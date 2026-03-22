@@ -15,7 +15,7 @@ RUN npm install -g playwright@latest
 RUN playwright install chromium --with-deps
 
 # Install Python packages for fallback
-RUN pip install requests beautifulsoup4 --break-system-packages
+RUN pip install requests beautifulsoup4
 
 # Verify everything
 RUN node --version && \
