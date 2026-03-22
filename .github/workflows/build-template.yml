@@ -8,12 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install E2B CLI
         run: npm install -g @e2b/cli
-        
+
       - name: Build Template
         env:
-          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-        run: |
-          e2b template build --name flowos-desktop --dockerfile e2b.Dockerfile
+          E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
+        run: e2b template build --name flowos-desktop --dockerfile e2b.Dockerfile
