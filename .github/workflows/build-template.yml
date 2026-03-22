@@ -1,0 +1,20 @@
+name: Build E2B Template
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install E2B CLI
+        run: npm install -g @e2b/cli
+        
+      - name: Build Template
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: |
+          e2b auth login --api-key $E2B_API_KEY
+          e2b template build --name flowos-desktop --dockerfile e2b.Dockerfile
