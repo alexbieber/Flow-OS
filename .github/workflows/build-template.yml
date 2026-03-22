@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+      E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       
