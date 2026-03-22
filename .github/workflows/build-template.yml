@@ -15,4 +15,4 @@ jobs:
       - name: Build Template
         env:
           E2B_ACCESS_TOKEN: ${{ secrets.E2B_ACCESS_TOKEN }}
-        run: e2b template build --name flowos-desktop --dockerfile e2b.Dockerfile
+        run: e2b template build --name flowos-desktop --dockerfile e2b.Dockerfile --force
