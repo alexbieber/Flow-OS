@@ -1,13 +1,23 @@
 "use client"
 
-import { Suspense, useCallback, useEffect, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { DEMO_USER_ID, SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
+import { createBrowserClient } from "@supabase/ssr"
+import { CREDITS_PER_REFILL } from "@/lib/constants/credits"
+import { SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
 
 interface Session {
   sessionId: string
   title: string
   createdAt: string
+}
+
+interface UserProfile {
+  email: string
+  name: string
+  avatarLetter: string
+  credits: number
+  plan: string
 }
 
 function SidebarWithNav({ children }: { children: React.ReactNode }) {
@@ -16,15 +26,83 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams()
   const currentSession = searchParams.get("session") ?? "default"
   const [sessions, setSessions] = useState<Session[]>([])
+  const [userId, setUserId] = useState<string | null>(null)
+  const [user, setUser] = useState<UserProfile | null>(null)
+  const [showUserMenu, setShowUserMenu] = useState(false)
+
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  )
+
+  useEffect(() => {
+    const loadUser = async () => {
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser()
+      if (!authUser) return
+
+      setUserId(authUser.id)
+
+      const email = authUser.email ?? ""
+      const fullName =
+        (authUser.user_metadata?.full_name as string | undefined) ??
+        (authUser.user_metadata?.name as string | undefined) ??
+        email.split("@")[0] ??
+        "User"
+      const firstName = fullName.split(" ")[0] ?? "User"
+
+      let credits = 0
+      const cr = await fetch("/api/credits")
+      if (cr.ok) {
+        const j = (await cr.json()) as { credits: number }
+        credits = j.credits
+      }
+
+      setUser({
+        email,
+        name: firstName,
+        avatarLetter: firstName[0]?.toUpperCase() ?? "U",
+        credits,
+        plan: "Free",
+      })
+    }
+    void loadUser()
+  }, [supabase])
+
+  useEffect(() => {
+    if (!showUserMenu || !userId) return
+    void (async () => {
+      const cr = await fetch("/api/credits")
+      if (cr.ok) {
+        const j = (await cr.json()) as { credits: number }
+        setUser((p) => (p ? { ...p, credits: j.credits } : p))
+      }
+    })()
+  }, [showUserMenu, userId])
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push("/login")
+    router.refresh()
+  }
 
   const loadSessions = useCallback(() => {
-    void fetch(`/api/sessions?userId=${encodeURIComponent(DEMO_USER_ID)}`)
+    if (!userId) {
+      setSessions([])
+      return
+    }
+    void fetch(`/api/sessions?userId=${encodeURIComponent(userId)}`)
       .then((r) => r.json())
       .then((data: unknown) => {
         setSessions(Array.isArray(data) ? (data as Session[]) : [])
       })
       .catch(() => setSessions([]))
-  }, [])
+  }, [userId])
 
   useEffect(() => {
     loadSessions()
@@ -39,6 +117,11 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   const handleNewTask = () => {
     router.push(`/chat?session=${crypto.randomUUID()}`)
   }
+
+  const creditPct =
+    CREDITS_PER_REFILL > 0
+      ? Math.min(100, ((user?.credits ?? 0) / CREDITS_PER_REFILL) * 100)
+      : 0
 
   return (
     <>
@@ -189,33 +272,139 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
           })}
         </div>
 
-        <div style={{
-          padding: "12px 16px",
-          borderTop: "1px solid #e5e5e2",
-          display: "flex", alignItems: "center",
-          justifyContent: "space-between",
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ position: "relative" }}>
+          {showUserMenu && (
             <div style={{
-              width: 28, height: 28, borderRadius: 8,
-              background: "linear-gradient(135deg, #667eea, #764ba2)",
-              display: "flex", alignItems: "center",
-              justifyContent: "center", color: "#fff",
-              fontSize: 12, fontWeight: 700,
-            }}>A</div>
-            <div>
-              <div style={{ fontSize: 12, color: "#333", fontWeight: 500 }}>Ambar</div>
-              <div style={{ fontSize: 11, color: "#999" }}>Free · $100 E2B</div>
+              position: "absolute",
+              bottom: "100%",
+              left: 12,
+              right: 12,
+              background: "#fff",
+              border: "1px solid #e5e5e2",
+              borderRadius: 10,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
+              overflow: "hidden",
+              marginBottom: 6,
+              zIndex: 50,
+            }}>
+              <div style={{
+                padding: "12px 14px",
+                borderBottom: "1px solid #f0f0ee",
+              }}>
+                <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>Credits remaining</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{
+                    flex: 1, height: 5, background: "#f0f0ee", borderRadius: 99,
+                  }}>
+                    <div style={{
+                      width: `${creditPct}%`,
+                      height: "100%",
+                      background: "linear-gradient(90deg, #667eea, #764ba2)",
+                      borderRadius: 99,
+                      transition: "width 0.4s",
+                    }} />
+                  </div>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#333" }}>
+                    {user?.credits ?? 0}/{CREDITS_PER_REFILL}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: "#bbb", marginTop: 4 }}>
+                  Resets every 6 hours
+                </div>
+              </div>
+
+              <div style={{
+                padding: "10px 14px",
+                borderBottom: "1px solid #f0f0ee",
+              }}>
+                <div style={{ fontSize: 11, color: "#999" }}>Signed in as</div>
+                <div style={{
+                  fontSize: 12, color: "#333", marginTop: 2,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {user?.email}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                style={{
+                  width: "100%", padding: "10px 14px",
+                  background: "none", border: "none",
+                  cursor: "pointer", textAlign: "left",
+                  fontSize: 13, color: "#555",
+                  display: "flex", alignItems: "center", gap: 8,
+                  borderBottom: "1px solid #f0f0ee",
+                  transition: "background 0.15s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#fafaf8" }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "none" }}
+              >
+                <span>✦</span> Upgrade to Pro
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void handleLogout()}
+                style={{
+                  width: "100%", padding: "10px 14px",
+                  background: "none", border: "none",
+                  cursor: "pointer", textAlign: "left",
+                  fontSize: 13, color: "#e53e3e",
+                  display: "flex", alignItems: "center", gap: 8,
+                  transition: "background 0.15s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#fff5f5" }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "none" }}
+              >
+                <span>→</span> Sign out
+              </button>
             </div>
-          </div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {["⚙", "⊞"].map((ic) => (
-              <button key={ic} type="button" style={{
-                background: "none", border: "none",
-                cursor: "pointer", color: "#bbb", fontSize: 16, padding: 4,
-              }}>{ic}</button>
-            ))}
-          </div>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setShowUserMenu((v) => !v)}
+            style={{
+              width: "100%",
+              padding: "12px 16px",
+              display: "flex", alignItems: "center",
+              justifyContent: "space-between",
+              background: showUserMenu ? "rgba(0,0,0,0.03)" : "none",
+              border: "none",
+              borderTop: "1px solid #e5e5e2",
+              cursor: "pointer",
+              transition: "background 0.15s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(0,0,0,0.03)" }}
+            onMouseLeave={(e) => { if (!showUserMenu) e.currentTarget.style.background = "none" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: "linear-gradient(135deg, #667eea, #764ba2)",
+                display: "flex", alignItems: "center",
+                justifyContent: "center", color: "#fff",
+                fontSize: 12, fontWeight: 700, flexShrink: 0,
+              }}>
+                {user?.avatarLetter ?? "?"}
+              </div>
+              <div style={{ textAlign: "left" }}>
+                <div style={{ fontSize: 12, color: "#333", fontWeight: 500 }}>
+                  {user?.name ?? "Loading…"}
+                </div>
+                <div style={{ fontSize: 11, color: "#999" }}>
+                  {user?.plan ?? "Free"} · {user?.credits ?? 0} credits
+                </div>
+              </div>
+            </div>
+            <span style={{
+              fontSize: 12, color: "#bbb",
+              transform: showUserMenu ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.2s",
+              display: "inline-block",
+            }}>▲</span>
+          </button>
         </div>
       </div>
 

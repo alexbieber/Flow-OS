@@ -1,7 +1,9 @@
+import { CREDITS_PER_REFILL } from "@/lib/constants/credits"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 
-const CREDITS_PER_REFILL = 10
 const REFILL_HOURS = 6
+
+export { CREDITS_PER_REFILL }
 
 export async function getCredits(userId: string): Promise<{
   credits: number
