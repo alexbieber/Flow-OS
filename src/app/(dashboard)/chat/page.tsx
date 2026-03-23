@@ -10,6 +10,7 @@ import {
 import { useRouter, useSearchParams } from "next/navigation"
 import { JarvisMessage, Brain, Run, RunLog } from "@/types"
 import { DEMO_USER_ID, SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
+import { getBrainById } from "@/lib/brains/registry"
 import { v4 as uuidv4 } from "uuid"
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -180,16 +181,8 @@ function ComputerPanel({
   steps: ExecutionStep[]
   onClose: () => void
 }) {
-  const [activeView, setActiveView] = useState<"browser" | "terminal" | "search">("browser")
+  const [activeView, setActiveView] = useState<"browser" | "terminal" | "search">("terminal")
   const currentStep = steps.find((s) => s.status === "running") ?? steps[steps.length - 1]
-
-  useEffect(() => {
-    if (!currentStep) return
-    const label = currentStep.label.toLowerCase()
-    if (label.includes("search")) setActiveView("search")
-    else if (label.includes("exec") || label.includes("command") || label.includes("extract")) setActiveView("terminal")
-    else setActiveView("browser")
-  }, [currentStep?.id, currentStep?.label])
 
   const completedSteps = steps.filter((s) => s.status === "done").length
   const progress = steps.length > 0 ? (completedSteps / steps.length) * 100 : 0
@@ -259,24 +252,69 @@ function ComputerPanel({
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {activeView === "terminal" ? (
           <div style={{
-            background: "#1a1a1a", height: "100%",
-            padding: 16, overflow: "auto",
-            fontFamily: "ui-monospace, monospace",
+            background: "#0d1117", height: "100%",
+            padding: "16px", overflow: "auto",
+            fontFamily: "'JetBrains Mono', 'Courier New', monospace",
           }}>
-            <div style={{ color: "#888", fontSize: 11, marginBottom: 8 }}>research_session</div>
-            <div style={{ color: "#4af", fontSize: 12 }}>ubuntu@sandbox:~$</div>
-            <div style={{ color: "#fff", fontSize: 12, marginTop: 4, lineHeight: 1.8 }}>
-              {run?.logs?.filter((l) => l.type === "action").slice(-3).map((l, i) => (
-                <div key={i} style={{ marginBottom: 4 }}>
-                  <span style={{ color: "#888" }}>{l.message}</span>
+            <div style={{ color: "#58a6ff", fontSize: 11, marginBottom: 12 }}>
+              flowos@jarvis ~ research_session
+            </div>
+            {run?.logs && run.logs.length > 0 ? (
+              run.logs.map((l, i) => (
+                <div key={i} style={{
+                  marginBottom: 6,
+                  display: "flex", gap: 8, alignItems: "flex-start",
+                }}>
+                  <span style={{
+                    color: l.type === "success" ? "#3fb950" :
+                      l.type === "error" ? "#f85149" :
+                        l.type === "ai" ? "#d2a8ff" :
+                          l.type === "action" ? "#79c0ff" :
+                            "#8b949e",
+                    fontSize: 11, flexShrink: 0,
+                  }}>
+                    {l.type === "success" ? "✓" :
+                      l.type === "error" ? "✗" :
+                        l.type === "ai" ? "🤖" :
+                          l.type === "action" ? "▶" : "·"}
+                  </span>
+                  <span style={{
+                    color: l.type === "success" ? "#3fb950" :
+                      l.type === "error" ? "#f85149" :
+                        l.type === "ai" ? "#d2a8ff" :
+                          l.type === "action" ? "#e6edf3" :
+                            "#8b949e",
+                    fontSize: 11, lineHeight: 1.6,
+                    wordBreak: "break-all",
+                  }}>
+                    {l.message}
+                  </span>
                 </div>
-              )) ?? (
-                <span style={{ color: "#888" }}>Initialising sandbox...</span>
-              )}
-            </div>
-            <div style={{ color: "#4af", fontSize: 12, marginTop: 8 }}>
-              ubuntu@sandbox:~$ <span style={{ animation: "blink 1s step-end infinite" }}>▌</span>
-            </div>
+              ))
+            ) : (
+              <div style={{ color: "#8b949e", fontSize: 11 }}>
+                Initialising...
+              </div>
+            )}
+            {run?.status === "running" && (
+              <div style={{
+                display: "flex", alignItems: "center",
+                gap: 8, marginTop: 8,
+              }}>
+                <span style={{ color: "#58a6ff", fontSize: 11 }}>▶</span>
+                <span style={{
+                  color: "#8b949e", fontSize: 11,
+                  animation: "pulse 1.4s ease-in-out infinite",
+                }}>
+                  Processing...
+                </span>
+              </div>
+            )}
+            {run?.status === "completed" && (
+              <div style={{ color: "#3fb950", fontSize: 11, marginTop: 8 }}>
+                ✓ Task complete. Results in chat.
+              </div>
+            )}
           </div>
         ) : activeView === "search" ? (
           <div style={{ background: "#fff", height: "100%", overflow: "auto", padding: 16 }}>
@@ -457,16 +495,11 @@ function MessageBubble({
   msg,
   onStepToggle,
   onFollowUp,
-  onLaunchBrain,
-  launchingBrain,
 }: {
   msg: TaskMessage
   onStepToggle: (msgId: string, stepId: string) => void
   onFollowUp: (text: string) => void
-  onLaunchBrain: (brain: Brain, userGoal?: string) => void
-  launchingBrain: string | null
 }) {
-  const router = useRouter()
   const [rating, setRating] = useState(0)
 
   if (msg.role === "user") {
@@ -546,78 +579,6 @@ function MessageBubble({
             fontSize: 13, color: "#888",
             fontFamily: "'Inter', sans-serif",
           }}>Thinking</span>
-        </div>
-      )}
-
-      {msg.brainSuggestion && !msg.executionSteps && (
-        <div style={{
-          background: "#fff", border: "1px solid #e5e5e2",
-          borderRadius: 12, overflow: "hidden",
-          boxShadow: "0 1px 6px rgba(0,0,0,0.06)",
-          marginTop: 12,
-        }}>
-          <div style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid #f0f0ee",
-            display: "flex", alignItems: "center", gap: 10,
-          }}>
-            <span style={{ fontSize: 20 }}>{msg.brainSuggestion.icon}</span>
-            <div style={{ flex: 1 }}>
-              <div style={{
-                fontWeight: 600, fontSize: 14, color: "#111",
-                fontFamily: "'Inter', sans-serif",
-              }}>
-                {msg.brainSuggestion.name}
-              </div>
-              <div style={{ fontSize: 11, color: "#999", marginTop: 1 }}>
-                ⏱ {msg.brainSuggestion.estimatedTime}
-                {" · "}⭐ {msg.brainSuggestion.rating}
-                {" · "}{msg.brainSuggestion.installs.toLocaleString()} runs
-              </div>
-            </div>
-            <span style={{ fontSize: 11, color: "#bbb" }}>···</span>
-          </div>
-          <div style={{ padding: "12px 16px 14px" }}>
-            <p style={{
-              fontSize: 13, color: "#666",
-              lineHeight: 1.6, marginBottom: 12,
-              fontFamily: "'Inter', sans-serif",
-            }}>
-              {msg.brainSuggestion.description}
-            </p>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => void onLaunchBrain(msg.brainSuggestion!)}
-                disabled={launchingBrain !== null}
-                style={{
-                  flex: 1, background: launchingBrain ? "#f0f0ee" : "#111",
-                  border: "none", borderRadius: 8,
-                  color: launchingBrain ? "#888" : "#fff",
-                  padding: "9px", fontSize: 13,
-                  fontWeight: 600, cursor: launchingBrain ? "not-allowed" : "pointer",
-                  fontFamily: "'Inter', sans-serif",
-                  transition: "all 0.2s",
-                }}
-              >
-                {launchingBrain === msg.brainSuggestion.id
-                  ? "⚡ Launching..."
-                  : "▶ Run this Brain"}
-              </button>
-              <button
-                type="button"
-                onClick={() => router.push("/marketplace")}
-                style={{
-                  background: "#f5f5f3", border: "1px solid #e0e0de",
-                  borderRadius: 8, padding: "9px 16px",
-                  fontSize: 13, color: "#555", cursor: "pointer",
-                  fontFamily: "'Inter', sans-serif",
-                }}
-              >
-                View →
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
@@ -903,9 +864,13 @@ function ChatPageInner() {
               id: String(row.id),
               role: row.role as TaskMessage["role"],
               content: String(row.content ?? ""),
-              timestamp: String(row.created_at ?? row.timestamp ?? new Date().toISOString()),
+              timestamp: String(row.created_at ?? new Date().toISOString()),
               runId: row.run_id != null ? String(row.run_id) : undefined,
-              brainSuggestion: row.brain_suggestion as Brain | undefined,
+              result:
+                row.run_id != null && row.role === "jarvis"
+                  ? String(row.content)
+                  : undefined,
+              executionDone: row.run_id != null ? true : undefined,
             })),
           )
         } else {
@@ -959,11 +924,28 @@ function ChatPageInner() {
                   : undefined,
             }
             if (run.status === "failed") {
-              merged.content = `${m.content}\n\nThe run stopped with an error. You can try again from the brain card.`
+              merged.content = `${m.content}\n\nThe run stopped with an error. Please try again.`
             }
             return merged
           }),
         )
+
+        if (run.status === "completed") {
+          const resultText = runResultText(run)
+          if (resultText) {
+            void fetch("/api/jarvis", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                userId: DEMO_USER_ID,
+                sessionId,
+                role: "jarvis",
+                content: resultText,
+                runId: run.id,
+              }),
+            })
+          }
+        }
 
         if (
           run.status === "running" ||
@@ -977,7 +959,7 @@ function ChatPageInner() {
       }
     }
     void tick()
-  }, [])
+  }, [sessionId])
 
   useEffect(() => {
     return () => {
@@ -985,49 +967,7 @@ function ChatPageInner() {
     }
   }, [])
 
-  const sendMessage = async (text?: string) => {
-    const content = text ?? input.trim()
-    if (!content || loading) return
-    setInput("")
-    setShowTools(false)
-
-    const userMsg: TaskMessage = {
-      id: uuidv4(),
-      role: "user",
-      content,
-      timestamp: new Date().toISOString(),
-    }
-    setMessages((prev) => [...prev, userMsg])
-    setLoading(true)
-
-    try {
-      const res = await fetch("/api/jarvis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content, userId: DEMO_USER_ID, sessionId }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(typeof data.error === "string" ? data.error : "Request failed")
-      }
-      setMessages((prev) => [...prev, data as TaskMessage])
-      window.dispatchEvent(new Event(SESSIONS_REFRESH_EVENT))
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uuidv4(),
-          role: "jarvis",
-          content: "Something went wrong. Please try again.",
-          timestamp: new Date().toISOString(),
-        },
-      ])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const launchBrain = async (brain: Brain, userGoal?: string) => {
+  async function launchBrain(brain: Brain, userGoal?: string) {
     setLaunchingBrain(brain.id)
     setShowComputer(true)
 
@@ -1059,6 +999,17 @@ function ChatPageInner() {
       executionDone: false,
     }
     setMessages((prev) => [...prev, execMsg])
+
+    void fetch("/api/jarvis", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: DEMO_USER_ID,
+        sessionId,
+        role: "jarvis",
+        content: execMsg.content,
+      }),
+    })
 
     try {
       const res = await fetch("/api/sandbox", {
@@ -1093,6 +1044,59 @@ function ChatPageInner() {
       )
     } finally {
       setLaunchingBrain(null)
+    }
+  }
+
+  const sendMessage = async (text?: string) => {
+    const content = text ?? input.trim()
+    if (!content || loading) return
+    setInput("")
+    setShowTools(false)
+
+    const userMsg: TaskMessage = {
+      id: uuidv4(),
+      role: "user",
+      content,
+      timestamp: new Date().toISOString(),
+    }
+    setMessages((prev) => [...prev, userMsg])
+    setLoading(true)
+
+    try {
+      const res = await fetch("/api/jarvis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: content, userId: DEMO_USER_ID, sessionId }),
+      })
+      const raw = (await res.json()) as Record<string, unknown>
+      if (!res.ok) {
+        throw new Error(typeof raw.error === "string" ? raw.error : "Request failed")
+      }
+      const data = raw as unknown as TaskMessage & {
+        shouldRunAgent?: boolean
+        brainId?: string | null
+      }
+      setMessages((prev) => [...prev, data as TaskMessage])
+      window.dispatchEvent(new Event(SESSIONS_REFRESH_EVENT))
+
+      if (data.shouldRunAgent && data.brainId) {
+        const brain = getBrainById(data.brainId)
+        if (brain) {
+          void launchBrain(brain, content)
+        }
+      }
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uuidv4(),
+          role: "jarvis",
+          content: "Something went wrong. Please try again.",
+          timestamp: new Date().toISOString(),
+        },
+      ])
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -1412,8 +1416,6 @@ function ChatPageInner() {
                   msg={msg}
                   onStepToggle={handleStepToggle}
                   onFollowUp={sendMessage}
-                  onLaunchBrain={launchBrain}
-                  launchingBrain={launchingBrain}
                 />
               ))}
 

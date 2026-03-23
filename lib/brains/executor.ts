@@ -1,12 +1,7 @@
+import { Sandbox } from "e2b"
 import { GoogleGenerativeAI } from "@google/generative-ai"
-import { Sandbox } from "@e2b/desktop"
-import { createDesktopSandbox, killSandbox, runCommand } from "@/lib/sandbox/e2b"
-import { resolveInputs } from "@/lib/vault"
-import { getServiceSupabase } from "@/lib/supabase/admin"
 import { Brain, Run, RunLog, RunStatus } from "@/types"
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" })
+import { createTerminalSandbox, runCommand, killSandbox } from "@/lib/sandbox/e2b"
 
 export type OnUpdate = (update: {
   status?: RunStatus
@@ -16,56 +11,132 @@ export type OnUpdate = (update: {
   result?: Run["result"]
 }) => void
 
-function log(onUpdate: OnUpdate, type: RunLog["type"], message: string) {
-  onUpdate({ log: { timestamp: new Date().toISOString(), type, message } })
-}
-
 interface AgentDecision {
   tool: string
   input: string
   reasoning?: string
 }
 
-// ── Tool implementations ──────────────────────────────────────────────────
+function log(onUpdate: OnUpdate, type: RunLog["type"], message: string) {
+  onUpdate({ log: { timestamp: new Date().toISOString(), type, message } })
+}
 
 async function askGemini(prompt: string): Promise<string> {
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+    generationConfig: { maxOutputTokens: 1500 },
+  })
   const result = await model.generateContent(prompt)
   return result.response.text().slice(0, 2000)
 }
 
 async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
-  try {
-    const encoded = encodeURIComponent(query)
-    const output = await runCommand(
-      sandbox,
-      `curl -s -L --max-time 12 -A "Mozilla/5.0" "https://ddg.gg/?q=${encoded}&format=json" 2>/dev/null || curl -s -L --max-time 12 -A "Mozilla/5.0" "https://html.duckduckgo.com/html/?q=${encoded}" 2>/dev/null | sed 's/<[^>]*>//g' | grep -v '^[[:space:]]*$' | head -50`,
-      15000
-    )
-    if (output && output.length > 100) {
-      return output.slice(0, 2000)
-    }
-    return await askGemini(
-      `Provide detailed factual information about: "${query}". Include specific statistics, names, and recent data.`
-    )
-  } catch {
-    return await askGemini(`Provide detailed factual information about: "${query}"`)
+  const result = await runCommand(
+    sandbox,
+    `python3 - << 'PYEOF'
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
+import re
+
+query = ${JSON.stringify(query)}
+headers = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+}
+
+try:
+    url = "https://www.google.com/search?q=" + urllib.parse.quote(query) + "&num=8&hl=en"
+    r = requests.get(url, headers=headers, timeout=15)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    results = []
+    urls = []
+
+    for g in soup.select("div.g")[:6]:
+        title = g.find("h3")
+        if not title:
+            continue
+        snippet_el = g.select_one(".VwiC3b, .IsZvec")
+        snippet = snippet_el.get_text(strip=True)[:200] if snippet_el else ""
+        link = g.find("a", href=True)
+        href = link["href"] if link else ""
+        if href.startswith("/url?q="):
+            href = href[7:].split("&")[0]
+        results.append(f"TITLE: {title.get_text(strip=True)}")
+        if snippet:
+            results.append(f"SNIPPET: {snippet}")
+        if href.startswith("http") and "google" not in href:
+            results.append(f"URL: {href}")
+            urls.append(href)
+        results.append("---")
+
+    print("SEARCH_RESULTS:")
+    print("\\n".join(results[:40]))
+
+    for url in urls[:2]:
+        try:
+            print(f"\\nREADING: {url}")
+            pr = requests.get(url, headers=headers, timeout=10)
+            psoup = BeautifulSoup(pr.text, "html.parser")
+            for tag in psoup(["script","style","nav","footer","header","aside"]):
+                tag.decompose()
+            main = psoup.find("main") or psoup.find("article") or psoup.find("body")
+            if main:
+                text = re.sub(r"\\s+", " ", main.get_text(separator=" ", strip=True))
+                print(f"CONTENT: {text[:1500]}")
+        except Exception as e:
+            print(f"Could not read {url}: {e}")
+
+except Exception as e:
+    print(f"Search error: {e}")
+PYEOF`,
+    45000
+  )
+
+  if (result && result.length > 100) {
+    return result.slice(0, 4000)
   }
+
+  return await askGemini(
+    `Detailed current facts about: "${query}". Include specific numbers and company names.`
+  )
 }
 
 async function toolFetch(sandbox: Sandbox, url: string): Promise<string> {
-  try {
-    const output = await runCommand(
-      sandbox,
-      `curl -s -L --max-time 12 -A "Mozilla/5.0" "${url}" 2>/dev/null | sed 's/<[^>]*>//g' | sed 's/&nbsp;/ /g' | grep -v '^[[:space:]]*$' | head -80`,
-      15000
-    )
-    if (output && output.length > 100) {
-      return output.slice(0, 2500)
-    }
-    return await askGemini(`What is the content and key information at this URL: ${url}?`)
-  } catch {
-    return await askGemini(`What information is available at: ${url}?`)
+  const result = await runCommand(
+    sandbox,
+    `python3 - << 'PYEOF'
+import requests
+from bs4 import BeautifulSoup
+import re
+
+url = ${JSON.stringify(url)}
+headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+
+try:
+    r = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
+    soup = BeautifulSoup(r.text, "html.parser")
+    for tag in soup(["script","style","nav","footer","header","aside","iframe"]):
+        tag.decompose()
+    main = soup.find("main") or soup.find("article") or soup.find("body")
+    if main:
+        text = re.sub(r"\\s+", " ", main.get_text(separator=" ", strip=True))
+        print(text[:3000])
+    else:
+        print("Could not extract content")
+except Exception as e:
+    print(f"Fetch error: {e}")
+PYEOF`,
+    30000
+  )
+
+  if (result && result.length > 100) {
+    return result.slice(0, 3000)
   }
+
+  return await askGemini(`Key content from: ${url}`)
 }
 
 async function toolThink(context: string, question: string): Promise<string> {
@@ -73,18 +144,16 @@ async function toolThink(context: string, question: string): Promise<string> {
 Based on this research:
 ${context.slice(0, 3000)}
 
-Answer this question with specific analysis:
+Answer this with specific analysis:
 ${question}
 `)
 }
-
-// ── The Agent Loop ────────────────────────────────────────────────────────
 
 export async function runAgentLoop(
   goal: string,
   sandbox: Sandbox,
   onUpdate: OnUpdate,
-  maxSteps = 12
+  maxSteps = 8
 ): Promise<string> {
   let memory = `GOAL: ${goal}\n\nRESEARCH LOG:\n`
   let stepCount = 0
@@ -95,86 +164,81 @@ export async function runAgentLoop(
   while (stepCount < maxSteps) {
     stepCount++
     const progress = Math.round((stepCount / maxSteps) * 85)
-    onUpdate({ progress, currentStep: `Agent thinking... (step ${stepCount}/${maxSteps})` })
+    onUpdate({
+      progress,
+      currentStep: `Step ${stepCount}/${maxSteps}`,
+    })
 
-    const decisionPrompt = `You are an autonomous research agent called Jarvis.
+    const decisionPrompt = `You are Jarvis, an autonomous AI research agent.
 
 GOAL: ${goal}
 
 RESEARCH SO FAR:
-${memory.slice(-4000)}
+${memory.slice(-3000)}
 
 STORED FACTS:
 ${Object.entries(memories).map(([k, v]) => `${k}: ${v}`).join("\n") || "None yet"}
 
-AVAILABLE TOOLS:
-- search(query) → Search Google for information
+TOOLS:
+- search(query) → Search Google + read top pages
 - fetch(url) → Read a specific webpage
-- think(question) → Analyse collected data to answer a question
-- remember(key, value) → Store an important fact for later
-- done(report) → Write final comprehensive report and finish
+- think(question) → Analyse collected data
+- remember(key=value) → Store important fact
+- done(report) → Write final report and finish
 
 RULES:
-- Use search and fetch to gather real data before concluding
-- Use think to analyse patterns in what you've gathered
-- Use remember to store key facts
-- Use done only when you have enough data for a comprehensive report
-- done report must be detailed Markdown with sections and specific data
-- Never make up data — only use what you've actually found
-- After 8 steps, always use done
+- Use search at least 2 times before done
+- Use fetch for important URLs found
+- NEVER call done before step 4
+- Current step: ${stepCount}/${maxSteps}
+${stepCount < 4 ? "- DO NOT CALL DONE YET. Research more." : ""}
+${stepCount >= 7 ? "- Call done now. Write comprehensive report." : ""}
 
-Decide your next action. Respond ONLY with valid JSON:
+Respond ONLY with valid JSON:
 {
   "tool": "search|fetch|think|remember|done",
-  "input": "the query, URL, question, key=value, or full markdown report",
-  "reasoning": "why this action moves toward the goal"
+  "input": "...",
+  "reasoning": "..."
 }`
 
     let decision: AgentDecision
     try {
-      const response = await model.generateContent(decisionPrompt)
-      const text = response.response.text()
-      const clean = text.replace(/```json|```/g, "").trim()
+      const response = await askGemini(decisionPrompt)
+      const clean = response.replace(/```json|```/g, "").trim()
       decision = JSON.parse(clean) as AgentDecision
     } catch {
-      log(onUpdate, "warning", "Decision parse error, retrying...")
+      log(onUpdate, "warning", "Retrying decision...")
       continue
     }
 
-    log(onUpdate, "ai", `Reasoning: ${decision.reasoning?.slice(0, 100) ?? ""}`)
+    log(onUpdate, "ai", `${decision.tool}: ${decision.input.slice(0, 80)}`)
 
     let result = ""
 
     if (decision.tool === "search") {
       log(onUpdate, "action", `Searching: "${decision.input}"`)
-      onUpdate({ currentStep: `Searching: ${decision.input}` })
+      onUpdate({ currentStep: `Searching: ${decision.input.slice(0, 50)}` })
       result = await toolSearch(sandbox, decision.input)
-      log(onUpdate, "action", `Found: ${result.slice(0, 100)}...`)
-      memory += `\n[Step ${stepCount}] SEARCH: "${decision.input}"\nResult: ${result.slice(0, 800)}\n`
+      memory += `\n[Step ${stepCount}] SEARCH: "${decision.input}"\n${result.slice(0, 1000)}\n`
     } else if (decision.tool === "fetch") {
       log(onUpdate, "action", `Reading: ${decision.input}`)
-      onUpdate({ currentStep: `Reading: ${decision.input.slice(0, 60)}` })
+      onUpdate({ currentStep: `Reading: ${decision.input.slice(0, 50)}` })
       result = await toolFetch(sandbox, decision.input)
-      log(onUpdate, "action", `Read ${result.length} chars`)
-      memory += `\n[Step ${stepCount}] FETCH: ${decision.input}\nContent: ${result.slice(0, 800)}\n`
+      memory += `\n[Step ${stepCount}] FETCH: ${decision.input}\n${result.slice(0, 1000)}\n`
     } else if (decision.tool === "think") {
-      log(onUpdate, "ai", `Analysing: "${decision.input}"`)
-      onUpdate({ currentStep: `Analysing: ${decision.input}` })
+      log(onUpdate, "ai", `Thinking: ${decision.input.slice(0, 60)}`)
+      onUpdate({ currentStep: `Analysing...` })
       result = await toolThink(memory, decision.input)
-      log(onUpdate, "ai", `Analysis: ${result.slice(0, 100)}...`)
-      memory += `\n[Step ${stepCount}] THINK: "${decision.input}"\nConclusion: ${result.slice(0, 500)}\n`
+      memory += `\n[Step ${stepCount}] THINK: ${result.slice(0, 500)}\n`
     } else if (decision.tool === "remember") {
       const parts = decision.input.split("=")
       const key = parts[0]?.trim()
       const value = parts.slice(1).join("=").trim()
-      if (key && value) {
-        memories[key] = value
-        log(onUpdate, "action", `Remembered: ${key} = ${value.slice(0, 80)}`)
-      }
-      memory += `\n[Step ${stepCount}] REMEMBERED: ${decision.input}\n`
+      if (key && value) memories[key] = value
+      memory += `\n[Step ${stepCount}] REMEMBER: ${decision.input}\n`
     } else if (decision.tool === "done") {
-      log(onUpdate, "success", "Agent completing task...")
-      onUpdate({ currentStep: "Writing final report...", progress: 95 })
+      log(onUpdate, "success", "Writing final report...")
+      onUpdate({ currentStep: "Writing report...", progress: 95 })
 
       let report = decision.input
         .replace(/^```[\w]*\n?/gm, "")
@@ -182,80 +246,66 @@ Decide your next action. Respond ONLY with valid JSON:
         .trim()
 
       if (report.length < 500) {
-        const expandPrompt = `Based on this research:\n${memory.slice(-3000)}\n\nWrite a comprehensive, detailed Markdown report for the goal: "${goal}"\n\nInclude specific data, numbers, and actionable insights. Use proper Markdown headers.`
-        const expanded = await model.generateContent(expandPrompt)
-        report = expanded.response.text()
+        report = await askGemini(`
+Based on this research:
+${memory.slice(-4000)}
+
+Write a comprehensive, detailed Markdown report for: "${goal}"
+
+Rules:
+- Use ## for sections
+- Use **bold** for key data
+- Include specific numbers and names
+- Be detailed and actionable
+- Never say hypothetical or simulated
+- Start directly with content
+`)
       }
 
       return report
     }
   }
 
-  log(onUpdate, "system", "Max steps reached, generating report...")
-  const finalPrompt = `Based on all this research:\n${memory.slice(-4000)}\n\nWrite a comprehensive Markdown report for: "${goal}"\n\nUse all the data collected. Be specific and detailed.`
-  const final = await model.generateContent(finalPrompt)
-  return final.response.text()
-}
+  return await askGemini(`
+Based on:
+${memory.slice(-4000)}
 
-// ── Main entry point ──────────────────────────────────────────────────────
+Write comprehensive Markdown report for: "${goal}"
+Include specific data, numbers, names. Never say hypothetical.
+`)
+}
 
 export async function executeBrain(
   run: Run,
   brain: Brain,
-  userId: string,
+  _userId: string,
   onUpdate: OnUpdate
 ): Promise<void> {
   let sandbox: Sandbox | null = null
 
   try {
-    onUpdate({ status: "starting", currentStep: "Spinning up cloud environment..." })
-    log(onUpdate, "system", "Creating E2B Desktop sandbox...")
+    onUpdate({ status: "starting", currentStep: "Starting sandbox..." })
+    log(onUpdate, "system", "Creating terminal sandbox...")
 
-    const { sandbox: desktop, streamUrl } = await createDesktopSandbox()
-    sandbox = desktop
-
-    // TEMPORARY: probe sandbox CLI — remove after Playwright approach is decided
-    const testResult = await runCommand(
-      sandbox,
-      "which playwright || which npx || node --version",
-      10000
-    )
-    log(onUpdate, "system", `Environment: ${testResult}`)
-
-    log(onUpdate, "system", `Desktop ready. Stream: ${streamUrl.slice(0, 60)}…`)
-
-    const supabase = getServiceSupabase()
-    await supabase.from("runs").update({ stream_url: streamUrl }).eq("id", run.id)
-
-    log(onUpdate, "system", "Environment ready.")
+    sandbox = await createTerminalSandbox()
+    log(onUpdate, "system", "Sandbox ready. Starting agent...")
     onUpdate({ status: "running", progress: 5 })
 
-    const vaultKeys: Record<string, string> = {}
-    brain.inputs.forEach((inp) => {
-      if (inp.vaultKey) vaultKeys[inp.key] = inp.vaultKey
-    })
-    const resolvedInputs = await resolveInputs(userId, run.inputs, vaultKeys)
-
-    const inputSummary = Object.entries(resolvedInputs)
-      .filter(([, v]) => v)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join(", ")
-
     const goal =
-      run.inputs["user_goal"]?.trim() ||
-      run.inputs["query"]?.trim() ||
-      `${brain.description}${inputSummary ? `. Specifically: ${inputSummary}` : ""}`
+      run.inputs["user_goal"]?.trim() ??
+      run.inputs["query"]?.trim() ??
+      brain.description
 
     const report = await runAgentLoop(goal, sandbox, onUpdate)
 
-    log(onUpdate, "success", `✓ ${brain.name} completed!`)
+    log(onUpdate, "success", "✓ Done!")
     onUpdate({
       status: "completed",
       progress: 100,
       currentStep: "Done",
       result: {
         success: true,
-        summary: `${brain.name} completed successfully.`,
+        summary: "Research completed.",
         data: { output: report },
       },
     })

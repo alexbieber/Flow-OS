@@ -1,6 +1,12 @@
 {
   "name": "flowos",
   "version": "0.1.0",
+  "description": "Autonomous AI research workspace — Jarvis, E2B sandboxes, Supabase.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexbieber/Flow-OS.git"
+  },
   "private": true,
   "scripts": {
     "dev": "next dev",

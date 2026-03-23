@@ -1,42 +1,25 @@
-import { Sandbox } from "@e2b/desktop"
+import { Sandbox } from "e2b"
 
-export async function createDesktopSandbox(): Promise<{
-  sandbox: Sandbox
-  streamUrl: string
-}> {
+export async function createTerminalSandbox(): Promise<Sandbox> {
   const sandbox = await Sandbox.create({
     apiKey: process.env.E2B_API_KEY!,
-    timeoutMs: 3600000,
-    resolution: [1280, 720],
+    timeoutMs: 300000,
   })
-
-  await sandbox.launch("google-chrome")
-  await sandbox.wait(4000)
-
-  await sandbox.stream.start({
-    requireAuth: true,
-  })
-
-  const authKey = sandbox.stream.getAuthKey()
-  const streamUrl = sandbox.stream.getUrl({ authKey, viewOnly: true })
-
-  return { sandbox, streamUrl }
-}
-
-/** Open a URL in the desktop default browser (Chrome). */
-export async function navigateTo(sandbox: Sandbox, url: string) {
-  await sandbox.open(url)
-  await sandbox.wait(3000)
+  await sandbox.commands.run(
+    "pip install requests beautifulsoup4 lxml --quiet --break-system-packages",
+    { timeoutMs: 60000 }
+  )
+  return sandbox
 }
 
 export async function runCommand(
   sandbox: Sandbox,
   cmd: string,
-  timeoutMs = 30000
+  timeoutMs = 60000
 ): Promise<string> {
   try {
     const result = await sandbox.commands.run(cmd, { timeoutMs })
-    return result.stdout + result.stderr
+    return (result.stdout ?? "") + (result.stderr ?? "")
   } catch (e: unknown) {
     if (e && typeof e === "object" && "stdout" in e && "stderr" in e) {
       const r = e as { stdout: string; stderr: string }
@@ -48,13 +31,8 @@ export async function runCommand(
 
 export async function killSandbox(sandbox: Sandbox) {
   try {
-    await sandbox.stream.stop()
-  } catch {
-    /* stream may not be running */
-  }
-  try {
     await sandbox.kill()
   } catch {
-    /* already dead */
+    /* ignore */
   }
 }
