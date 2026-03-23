@@ -3,7 +3,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { createBrowserClient } from "@supabase/ssr"
-import { CREDITS_PER_REFILL } from "@/lib/constants/credits"
 import { SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
 
 interface Session {
@@ -17,7 +16,8 @@ interface UserProfile {
   name: string
   avatarLetter: string
   credits: number
-  plan: string
+  maxCredits: number
+  nextRefill: string | null
 }
 
 function SidebarWithNav({ children }: { children: React.ReactNode }) {
@@ -56,19 +56,22 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
         "User"
       const firstName = fullName.split(" ")[0] ?? "User"
 
-      let credits = 0
-      const cr = await fetch("/api/credits")
-      if (cr.ok) {
-        const j = (await cr.json()) as { credits: number }
-        credits = j.credits
-      }
+      const creditsRes = await fetch("/api/credits")
+      const creditsData = creditsRes.ok
+        ? ((await creditsRes.json()) as {
+            credits: number
+            maxCredits?: number
+            nextRefill?: string | null
+          })
+        : { credits: 0, maxCredits: 10, nextRefill: null as string | null }
 
       setUser({
         email,
         name: firstName,
         avatarLetter: firstName[0]?.toUpperCase() ?? "U",
-        credits,
-        plan: "Free",
+        credits: creditsData.credits ?? 0,
+        maxCredits: creditsData.maxCredits ?? 10,
+        nextRefill: creditsData.nextRefill ?? null,
       })
     }
     void loadUser()
@@ -79,8 +82,21 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
     void (async () => {
       const cr = await fetch("/api/credits")
       if (cr.ok) {
-        const j = (await cr.json()) as { credits: number }
-        setUser((p) => (p ? { ...p, credits: j.credits } : p))
+        const j = (await cr.json()) as {
+          credits: number
+          maxCredits?: number
+          nextRefill?: string | null
+        }
+        setUser((p) =>
+          p
+            ? {
+                ...p,
+                credits: j.credits,
+                maxCredits: j.maxCredits ?? p.maxCredits,
+                nextRefill: j.nextRefill ?? null,
+              }
+            : p
+        )
       }
     })()
   }, [showUserMenu, userId])
@@ -118,9 +134,10 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
     router.push(`/chat?session=${crypto.randomUUID()}`)
   }
 
+  const maxCredits = user?.maxCredits ?? 10
   const creditPct =
-    CREDITS_PER_REFILL > 0
-      ? Math.min(100, ((user?.credits ?? 0) / CREDITS_PER_REFILL) * 100)
+    maxCredits > 0
+      ? Math.min(100, ((user?.credits ?? 0) / maxCredits) * 100)
       : 0
 
   return (
@@ -305,11 +322,13 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
                     }} />
                   </div>
                   <span style={{ fontSize: 12, fontWeight: 600, color: "#333" }}>
-                    {user?.credits ?? 0}/{CREDITS_PER_REFILL}
+                    {user?.credits ?? 0}/{user?.maxCredits ?? 10}
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: "#bbb", marginTop: 4 }}>
-                  Resets every 6 hours
+                  {user?.nextRefill
+                    ? `Refills ${new Date(user.nextRefill).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                    : "Resets every 6 hours"}
                 </div>
               </div>
 
@@ -394,7 +413,7 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
                   {user?.name ?? "Loading…"}
                 </div>
                 <div style={{ fontSize: 11, color: "#999" }}>
-                  {user?.plan ?? "Free"} · {user?.credits ?? 0} credits
+                  Free · {user?.credits ?? 0} credits
                 </div>
               </div>
             </div>
