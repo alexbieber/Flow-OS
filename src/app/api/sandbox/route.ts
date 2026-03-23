@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getBrainById } from "@/lib/brains/registry"
 import { executeBrain } from "@/lib/brains/executor"
+import { getCredits, deductCredit } from "@/lib/supabase/credits"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 import { Run, RunLog } from "@/types"
 import { v4 as uuidv4 } from "uuid"
@@ -56,6 +57,35 @@ export async function POST(req: NextRequest) {
     const brain = getBrainById(brainId)
     if (!brain) {
       return NextResponse.json({ error: "Brain not found" }, { status: 404 })
+    }
+
+    const { canRun, credits, nextRefill } = await getCredits(userId)
+
+    if (!canRun) {
+      const timeLeft = nextRefill
+        ? Math.ceil((nextRefill.getTime() - Date.now()) / (1000 * 60))
+        : 360
+
+      return NextResponse.json(
+        {
+          error: `No credits left. Refills in ${timeLeft} minutes.`,
+          credits: 0,
+          nextRefill: nextRefill?.toISOString(),
+        },
+        { status: 429 }
+      )
+    }
+
+    const deducted = await deductCredit(userId)
+    if (!deducted) {
+      return NextResponse.json(
+        {
+          error: "No credits left.",
+          credits: credits ?? 0,
+          nextRefill: nextRefill?.toISOString(),
+        },
+        { status: 429 }
+      )
     }
 
     // Create run record

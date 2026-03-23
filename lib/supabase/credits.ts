@@ -1,0 +1,80 @@
+import { getServiceSupabase } from "@/lib/supabase/admin"
+
+const CREDITS_PER_REFILL = 10
+const REFILL_HOURS = 6
+
+export async function getCredits(userId: string): Promise<{
+  credits: number
+  nextRefill: Date | null
+  canRun: boolean
+}> {
+  const supabase = getServiceSupabase()
+
+  const { data, error } = await supabase
+    .from("user_credits")
+    .select("*")
+    .eq("user_id", userId)
+    .single()
+
+  if (error || !data) {
+    await supabase.from("user_credits").insert({
+      user_id: userId,
+      credits: CREDITS_PER_REFILL,
+      last_refill: new Date().toISOString(),
+      total_runs: 0,
+    })
+    return { credits: CREDITS_PER_REFILL, nextRefill: null, canRun: true }
+  }
+
+  const lastRefill = new Date(String(data.last_refill))
+  const now = new Date()
+  const hoursSinceRefill =
+    (now.getTime() - lastRefill.getTime()) / (1000 * 60 * 60)
+
+  if (hoursSinceRefill >= REFILL_HOURS && data.credits < CREDITS_PER_REFILL) {
+    await supabase
+      .from("user_credits")
+      .update({
+        credits: CREDITS_PER_REFILL,
+        last_refill: now.toISOString(),
+      })
+      .eq("user_id", userId)
+
+    return { credits: CREDITS_PER_REFILL, nextRefill: null, canRun: true }
+  }
+
+  const nextRefill =
+    data.credits === 0
+      ? new Date(lastRefill.getTime() + REFILL_HOURS * 60 * 60 * 1000)
+      : null
+
+  return {
+    credits: Number(data.credits),
+    nextRefill,
+    canRun: Number(data.credits) > 0,
+  }
+}
+
+export async function deductCredit(userId: string): Promise<boolean> {
+  const supabase = getServiceSupabase()
+
+  const { data } = await supabase
+    .from("user_credits")
+    .select("credits, total_runs")
+    .eq("user_id", userId)
+    .single()
+
+  if (!data || Number(data.credits) <= 0) return false
+
+  const totalRuns = Number(data.total_runs ?? 0)
+
+  await supabase
+    .from("user_credits")
+    .update({
+      credits: Number(data.credits) - 1,
+      total_runs: totalRuns + 1,
+    })
+    .eq("user_id", userId)
+
+  return true
+}
