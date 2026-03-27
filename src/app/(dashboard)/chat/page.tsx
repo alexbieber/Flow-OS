@@ -8,9 +8,10 @@ import {
   useCallback,
 } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { JarvisMessage, Brain, Run, RunLog } from "@/types"
-import { DEMO_USER_ID, SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
-import { getBrainById } from "@/lib/brains/registry"
+import { JarvisMessage, Run } from "@/types"
+import { SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
+import { getBrowserSupabase } from "@/lib/supabase/browser"
+import { SafeMarkdown } from "@/components/safe-markdown"
 import { v4 as uuidv4 } from "uuid"
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -43,19 +44,6 @@ function runResultText(run: Run): string | undefined {
 // ── Markdown ────────────────────────────────────────────────────────────────
 
 function MarkdownResult({ content }: { content: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!ref.current) return
-    const html = content
-      .replace(/^### (.+)$/gm, "<h3>$1</h3>")
-      .replace(/^## (.+)$/gm, "<h2>$1</h2>")
-      .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/^\- (.+)$/gm, "<li class='ul-li'>$1</li>")
-      .replace(/^\d+\. (.+)$/gm, "<li class='ol-li'>$1</li>")
-      .replace(/\n\n/g, "</p><p>")
-    ref.current.innerHTML = `<p>${html}</p>`
-  }, [content])
   return (
     <>
       <style>{`
@@ -70,7 +58,7 @@ function MarkdownResult({ content }: { content: string }) {
         .md-result li.ul-li::before { content:'•'; position:absolute; left:2px; color:#999; }
         .md-result li.ol-li { padding:3px 0; color:#444; }
       `}</style>
-      <div ref={ref} className="md-result" />
+      <SafeMarkdown content={content} className="md-result" />
     </>
   )
 }
@@ -181,7 +169,7 @@ function ComputerPanel({
   steps: ExecutionStep[]
   onClose: () => void
 }) {
-  const [activeView, setActiveView] = useState<"browser" | "terminal" | "search">("terminal")
+  const [activeView] = useState<"browser" | "terminal" | "search">("terminal")
   const currentStep = steps.find((s) => s.status === "running") ?? steps[steps.length - 1]
 
   const completedSteps = steps.filter((s) => s.status === "done").length
@@ -838,11 +826,13 @@ function ChatPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const sessionId = searchParams.get("session") ?? "default"
+  const projectId = searchParams.get("project")
 
+  const [userId, setUserId] = useState<string | null>(null)
+  const [projectLabel, setProjectLabel] = useState<string | null>(null)
   const [messages, setMessages] = useState<TaskMessage[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
-  const [launchingBrain, setLaunchingBrain] = useState<string | null>(null)
   const [showComputer, setShowComputer] = useState(false)
   const [activeRun, setActiveRun] = useState<Run | null>(null)
   const [activeSteps, setActiveSteps] = useState<ExecutionStep[]>([])
@@ -851,11 +841,35 @@ function ChatPageInner() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
+    void (async () => {
+      const {
+        data: { user },
+      } = await getBrowserSupabase().auth.getUser()
+      setUserId(user?.id ?? null)
+      if (!user) router.replace("/login")
+    })()
+  }, [router])
+
+  useEffect(() => {
+    if (!projectId) {
+      setProjectLabel(null)
+      return
+    }
+    void fetch(`/api/projects/${encodeURIComponent(projectId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { name?: string } | null) => {
+        setProjectLabel(typeof j?.name === "string" && j.name.trim() ? j.name.trim() : "Project")
+      })
+      .catch(() => setProjectLabel("Project"))
+  }, [projectId])
+
+  useEffect(() => {
+    if (!userId) return
     setMessages([])
     const load = async () => {
       try {
         const res = await fetch(
-          `/api/jarvis?userId=${encodeURIComponent(DEMO_USER_ID)}&sessionId=${encodeURIComponent(sessionId)}`,
+          `/api/jarvis?sessionId=${encodeURIComponent(sessionId)}`,
         )
         const data = await res.json()
         if (Array.isArray(data) && data.length > 0) {
@@ -881,7 +895,7 @@ function ChatPageInner() {
       }
     }
     void load()
-  }, [sessionId])
+  }, [sessionId, userId])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -937,7 +951,6 @@ function ChatPageInner() {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                userId: DEMO_USER_ID,
                 sessionId,
                 role: "jarvis",
                 content: resultText,
@@ -967,31 +980,30 @@ function ChatPageInner() {
     }
   }, [])
 
-  async function launchBrain(brain: Brain, userGoal?: string) {
-    setLaunchingBrain(brain.id)
-    setShowComputer(true)
+  const projectBody =
+    projectId && projectId.length > 0 ? { projectId } : {}
 
+  async function launchResearch(researchGoal: string) {
     const lastUserMessage = messages
       .filter((m) => m.role === "user")
       .pop()?.content ?? ""
 
-    const autoInputs: Record<string, string> = {}
+    const goal = researchGoal.trim() || lastUserMessage.trim()
+    if (!goal) return
 
-    if (lastUserMessage || userGoal) {
-      const text = userGoal ?? lastUserMessage
-      const firstInput = brain.inputs[0]
-      if (firstInput) {
-        autoInputs[firstInput.key] = text
-      }
-      autoInputs.query = text
-      autoInputs.user_goal = text
+    setShowComputer(true)
+    const autoInputs: Record<string, string> = {
+      query: goal,
+      user_goal: goal,
     }
 
+    const preview =
+      goal.length > 100 ? `${goal.slice(0, 100)}…` : goal
     const execMsgId = uuidv4()
     const execMsg: TaskMessage = {
       id: execMsgId,
       role: "jarvis",
-      content: `I will research: "${(userGoal ?? lastUserMessage).slice(0, 100)}${(userGoal ?? lastUserMessage).length > 100 ? "…" : ""}"`,
+      content: `I will research: "${preview}"`,
       timestamp: new Date().toISOString(),
       executionSteps: [
         { id: "setup", icon: "⚙", label: "Setting up cloud sandbox", status: "running" },
@@ -1004,7 +1016,6 @@ function ChatPageInner() {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        userId: DEMO_USER_ID,
         sessionId,
         role: "jarvis",
         content: execMsg.content,
@@ -1015,11 +1026,7 @@ function ChatPageInner() {
       const res = await fetch("/api/sandbox", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          brainId: brain.id,
-          inputs: autoInputs,
-          userId: DEMO_USER_ID,
-        }),
+        body: JSON.stringify({ inputs: autoInputs, ...projectBody }),
       })
       const data = (await res.json()) as { runId?: string; error?: string }
       if (!res.ok) {
@@ -1042,8 +1049,6 @@ function ChatPageInner() {
             : m,
         ),
       )
-    } finally {
-      setLaunchingBrain(null)
     }
   }
 
@@ -1066,7 +1071,7 @@ function ChatPageInner() {
       const res = await fetch("/api/jarvis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content, userId: DEMO_USER_ID, sessionId }),
+        body: JSON.stringify({ message: content, sessionId, ...projectBody }),
       })
       const raw = (await res.json()) as Record<string, unknown>
       if (!res.ok) {
@@ -1074,16 +1079,17 @@ function ChatPageInner() {
       }
       const data = raw as unknown as TaskMessage & {
         shouldRunAgent?: boolean
-        brainId?: string | null
+        researchGoal?: string
       }
       setMessages((prev) => [...prev, data as TaskMessage])
       window.dispatchEvent(new Event(SESSIONS_REFRESH_EVENT))
 
-      if (data.shouldRunAgent && data.brainId) {
-        const brain = getBrainById(data.brainId)
-        if (brain) {
-          void launchBrain(brain, content)
-        }
+      if (data.shouldRunAgent) {
+        const goal =
+          typeof data.researchGoal === "string" && data.researchGoal.trim()
+            ? data.researchGoal.trim()
+            : content
+        void launchResearch(goal)
       }
     } catch {
       setMessages((prev) => [
@@ -1122,7 +1128,7 @@ function ChatPageInner() {
   const handleClear = async () => {
     try {
       await fetch(
-        `/api/jarvis?userId=${encodeURIComponent(DEMO_USER_ID)}&sessionId=${encodeURIComponent(sessionId)}`,
+        `/api/jarvis?sessionId=${encodeURIComponent(sessionId)}`,
         { method: "DELETE" },
       )
     } catch {
@@ -1142,6 +1148,18 @@ function ChatPageInner() {
   const isEmpty = messages.length === 0
   const hasRunning = messages.some((m) => m.executionSteps && !m.executionDone)
 
+  if (!userId) {
+    return (
+      <div style={{
+        flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
+        height: "100vh", background: "#fafaf8", color: "#999", fontSize: 14,
+      }}
+      >
+        Loading…
+      </div>
+    )
+  }
+
   return (
     <div style={{
       flex: 1, display: "flex",
@@ -1159,7 +1177,7 @@ function ChatPageInner() {
           justifyContent: "space-between",
           background: "#fafaf8", flexShrink: 0,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{
               fontSize: 15, fontWeight: 500, color: "#111",
               fontFamily: "'Inter', sans-serif",
@@ -1170,6 +1188,25 @@ function ChatPageInner() {
               fontFamily: "'Inter', sans-serif",
               cursor: "pointer",
             }}>Jarvis ⌄</span>
+            {projectId && projectLabel && (
+              <span
+                title="Master instructions and reference from Projects apply to this chat."
+                style={{
+                  background: "rgba(66,133,244,0.1)",
+                  color: "#1a56c4",
+                  padding: "2px 10px",
+                  borderRadius: 4,
+                  fontSize: 11,
+                  fontFamily: "'Inter', sans-serif",
+                  maxWidth: 220,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                ◇ {projectLabel}
+              </span>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {hasRunning && (
@@ -1254,11 +1291,22 @@ function ChatPageInner() {
               <h1 style={{
                 fontFamily: "'Georgia', serif",
                 fontSize: 40, fontWeight: 400,
-                color: "#111", marginBottom: 32,
+                color: "#111", marginBottom: 20,
                 textAlign: "center", letterSpacing: -0.5,
               }}>
                 What can I do for you?
               </h1>
+
+              <p style={{
+                fontSize: 13, color: "#666", textAlign: "center",
+                maxWidth: 520, lineHeight: 1.65, marginBottom: 28,
+                fontFamily: "'Inter', sans-serif",
+              }}>
+                Agent mode plans the work, searches the web (including parallel “wide” research), reads pages with
+                HTTP or a headless Chromium (Playwright) session with a persistent profile — including optional
+                screenshot + Gemini vision for what’s on screen — plus Python in the sandbox, and exportable reports.
+                Full Manus-style live browser video and slide products are not included here.
+              </p>
 
               <div style={{
                 width: "100%", maxWidth: 660,
@@ -1310,7 +1358,7 @@ function ChatPageInner() {
                         minWidth: 220, zIndex: 100,
                       }}>
                         {[
-                          { icon: "🧠", label: "Browse Brains", action: () => router.push("/marketplace") },
+                          { icon: "◎", label: "My runs", action: () => router.push("/runs") },
                           { icon: "🎨", label: "Add from Figma" },
                           { icon: "☁️", label: "Add from Google Drive" },
                           { icon: "📎", label: "Add local file" },

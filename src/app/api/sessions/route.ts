@@ -1,19 +1,18 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
+import { getAuthenticatedUser } from "@/lib/auth/session"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url)
-  const userId = searchParams.get("userId")
-
-  if (!userId) {
-    return NextResponse.json({ error: "userId required" }, { status: 400 })
+export async function GET() {
+  const user = await getAuthenticatedUser()
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   const supabase = getServiceSupabase()
   const { data, error } = await supabase
     .from("jarvis_messages")
     .select("session_id, content, created_at")
-    .eq("user_id", userId)
+    .eq("user_id", user.id)
     .eq("role", "user")
     .order("created_at", { ascending: false })
 

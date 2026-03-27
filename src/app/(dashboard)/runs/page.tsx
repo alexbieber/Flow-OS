@@ -1,9 +1,8 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Run, RunLog } from "@/types"
-import { marked } from "marked"
-import { DEMO_USER_ID } from "@/lib/constants/demo-user"
+import { SafeMarkdown } from "@/components/safe-markdown"
 
 const statusColor = (s: string) =>
   ({ running: "#16a34a", completed: "#4285f4", failed: "#ef4444", queued: "#999", starting: "#7c3aed", paused: "#999" }[s] ?? "#999")
@@ -21,19 +20,6 @@ const LOG_COLORS: Record<RunLog["type"], string> = {
 }
 
 function MarkdownBody({ content }: { content: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!ref.current) return
-    marked.setOptions({ breaks: true })
-    let cancelled = false
-    void (async () => {
-      const out = await marked.parse(content)
-      const html = typeof out === "string" ? out : String(out)
-      if (!cancelled && ref.current) ref.current.innerHTML = html
-    })()
-    return () => { cancelled = true }
-  }, [content])
-
   return (
     <>
       <style>{`
@@ -57,13 +43,29 @@ function MarkdownBody({ content }: { content: string }) {
         .md-light td { padding: 8px 12px; border: 1px solid #e5e5e2; color: #555; }
         .md-light tr:hover td { background: #fafaf8; }
       `}</style>
-      <div ref={ref} className="md-light" />
+      <SafeMarkdown content={content} className="md-light" />
     </>
   )
 }
 
+function buildSlideOutlineMd(reportMd: string): string {
+  const lines = reportMd.split("\n")
+  const bullets: string[] = ["# Slide outline (from report headings)", ""]
+  for (const line of lines) {
+    const m = line.match(/^(#{1,3})\s+(.+)/)
+    if (m) bullets.push(`- ${m[2].trim()}`)
+    if (bullets.length > 36) break
+  }
+  if (bullets.length <= 2) {
+    return "# Slide outline\n\n- (Add more ## headings to the report for auto outline.)"
+  }
+  return bullets.join("\n")
+}
+
 function ResultsModal({ run, onClose }: { run: Run; onClose: () => void }) {
   const output = run.result?.data?.output ?? run.result?.summary ?? ""
+  const plan =
+    typeof run.result?.data?.plan === "string" ? run.result.data.plan.trim() : ""
   const [copied, setCopied] = useState(false)
   const [rating, setRating] = useState(0)
 
@@ -145,6 +147,35 @@ function ResultsModal({ run, onClose }: { run: Run; onClose: () => void }) {
     const a = document.createElement("a")
     a.href = url
     a.download = `FlowOS-Report-${new Date().toISOString().slice(0, 10)}.html`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadMd = () => {
+    const md = [
+      `# ${run.brainName} — FlowOS`,
+      "",
+      `_Run ${run.id.slice(0, 8)}… · ${new Date(run.startedAt).toISOString().slice(0, 10)}_`,
+      "",
+      plan ? "## Task plan\n\n" + plan + "\n\n---\n\n" : "",
+      cleanOutput,
+    ].join("\n")
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `FlowOS-Report-${new Date().toISOString().slice(0, 10)}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadSlideOutline = () => {
+    const md = buildSlideOutlineMd(cleanOutput)
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `FlowOS-Slides-outline-${new Date().toISOString().slice(0, 10)}.md`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -242,12 +273,60 @@ function ResultsModal({ run, onClose }: { run: Run; onClose: () => void }) {
                   padding: "5px 12px", fontSize: 12, cursor: "pointer",
                 }}
               >
-                ⬇ Download
+                ⬇ HTML
+              </button>
+              <button
+                type="button"
+                onClick={downloadMd}
+                style={{
+                  background: "#fff", border: "1px solid #e0e0de",
+                  color: "#555", borderRadius: 8,
+                  padding: "5px 12px", fontSize: 12, cursor: "pointer",
+                }}
+              >
+                .md
+              </button>
+              <button
+                type="button"
+                onClick={downloadSlideOutline}
+                style={{
+                  background: "#fff", border: "1px solid #e0e0de",
+                  color: "#555", borderRadius: 8,
+                  padding: "5px 12px", fontSize: 12, cursor: "pointer",
+                }}
+              >
+                Slides
               </button>
             </div>
           </div>
 
           <div style={{ padding: "24px 32px" }}>
+            {plan ? (
+              <details
+                style={{
+                  marginBottom: 20,
+                  border: "1px solid #e5e5e2",
+                  borderRadius: 10,
+                  padding: "10px 14px",
+                  background: "#fafaf8",
+                }}
+              >
+                <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#333" }}>
+                  Task plan (agent)
+                </summary>
+                <pre style={{
+                  margin: "12px 0 0",
+                  whiteSpace: "pre-wrap",
+                  fontSize: 12,
+                  lineHeight: 1.55,
+                  color: "#444",
+                  fontFamily: "ui-monospace, monospace",
+                }}
+                >
+                  {plan}
+                </pre>
+              </details>
+            ) : null}
             {cleanOutput ? (
               <MarkdownBody content={cleanOutput} />
             ) : (
@@ -389,7 +468,7 @@ export default function RunsPage() {
 
   const fetchRuns = useCallback(async () => {
     try {
-      const res = await fetch(`/api/sandbox?userId=${DEMO_USER_ID}`)
+      const res = await fetch("/api/sandbox")
       const data = await res.json()
       setRuns(Array.isArray(data) ? data : [])
     } catch {
@@ -421,8 +500,6 @@ export default function RunsPage() {
       flex: 1, overflow: "auto", padding: 28,
       background: "#fafaf8",
     }}>
-      <link href="https://fonts.googleapis.com/css2?family=Georgia&display=swap" rel="stylesheet" />
-
       <div style={{ marginBottom: 28 }}>
         <h1 style={{
           fontFamily: "'Georgia', serif",
@@ -450,7 +527,7 @@ export default function RunsPage() {
             No runs yet
           </div>
           <div style={{ fontSize: 13, color: "#bbb" }}>
-            Go to Brains and run one to get started
+            Start a research task from chat to see runs here
           </div>
         </div>
       )}

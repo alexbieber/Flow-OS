@@ -11,6 +11,15 @@ interface Session {
   createdAt: string
 }
 
+interface FlowosProjectRow {
+  id: string
+  name: string
+  instructions: string
+  context: string
+  createdAt: string
+  updatedAt: string
+}
+
 interface UserProfile {
   email: string
   name: string
@@ -25,7 +34,9 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const currentSession = searchParams.get("session") ?? "default"
+  const projectParam = searchParams.get("project")
   const [sessions, setSessions] = useState<Session[]>([])
+  const [projects, setProjects] = useState<FlowosProjectRow[]>([])
   const [userId, setUserId] = useState<string | null>(null)
   const [user, setUser] = useState<UserProfile | null>(null)
   const [showUserMenu, setShowUserMenu] = useState(false)
@@ -107,12 +118,35 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
     router.refresh()
   }
 
+  const chatHref = useCallback(
+    (sessionId: string) => {
+      const p = new URLSearchParams()
+      p.set("session", sessionId)
+      if (projectParam) p.set("project", projectParam)
+      return `/chat?${p.toString()}`
+    },
+    [projectParam]
+  )
+
+  const loadProjects = useCallback(() => {
+    if (!userId) {
+      setProjects([])
+      return
+    }
+    void fetch("/api/projects")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: unknown) => {
+        setProjects(Array.isArray(data) ? (data as FlowosProjectRow[]) : [])
+      })
+      .catch(() => setProjects([]))
+  }, [userId])
+
   const loadSessions = useCallback(() => {
     if (!userId) {
       setSessions([])
       return
     }
-    void fetch(`/api/sessions?userId=${encodeURIComponent(userId)}`)
+    void fetch("/api/sessions")
       .then((r) => r.json())
       .then((data: unknown) => {
         setSessions(Array.isArray(data) ? (data as Session[]) : [])
@@ -121,8 +155,12 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   }, [userId])
 
   useEffect(() => {
-    loadSessions()
+    queueMicrotask(() => loadSessions())
   }, [pathname, searchParams, loadSessions])
+
+  useEffect(() => {
+    queueMicrotask(() => loadProjects())
+  }, [pathname, userId, loadProjects])
 
   useEffect(() => {
     const onRefresh = () => loadSessions()
@@ -131,7 +169,7 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   }, [loadSessions])
 
   const handleNewTask = () => {
-    router.push(`/chat?session=${crypto.randomUUID()}`)
+    router.push(chatHref(crypto.randomUUID()))
   }
 
   const maxCredits = user?.maxCredits ?? 10
@@ -160,7 +198,13 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", background: "none", border: "none", padding: 0 }}
-            onClick={() => router.push("/chat")}
+            onClick={() => {
+              router.push(
+                projectParam ?
+                  `/chat?project=${encodeURIComponent(projectParam)}`
+                : "/chat",
+              )
+            }}
           >
             <div style={{
               width: 28, height: 28, background: "#111",
@@ -202,7 +246,7 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
 
         <div style={{ padding: "0 12px 8px" }}>
           {[
-            { path: "/marketplace", icon: "⊙", label: "Brains" },
+            { path: "/projects", icon: "◇", label: "Projects" },
             { path: "/runs", icon: "◎", label: "My Runs" },
             { path: "/vault", icon: "⊟", label: "Library" },
           ].map((item) => {
@@ -233,6 +277,56 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
           })}
         </div>
 
+        <div style={{ padding: "4px 12px 10px", borderBottom: "1px solid #ecece8" }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between",
+            alignItems: "center", marginBottom: 6, padding: "0 4px",
+          }}>
+            <span style={{ fontSize: 12, color: "#999" }}>Workspace</span>
+            <button
+              type="button"
+              onClick={() => router.push("/projects")}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: 11,
+                color: "#4285f4",
+                padding: 0,
+              }}
+            >
+              Manage
+            </button>
+          </div>
+          {projectParam && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "#555",
+                padding: "6px 8px",
+                borderRadius: 8,
+                background: "rgba(66,133,244,0.08)",
+                marginBottom: 6,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title={
+                projects.find((p) => p.id === projectParam)?.name ?? "Project"
+              }
+            >
+              ◇{" "}
+              {projects.find((p) => p.id === projectParam)?.name ?? "Project"}
+            </div>
+          )}
+          {!projectParam && (
+            <div style={{ fontSize: 11, color: "#bbb", padding: "2px 4px 6px" }}>
+              Open <strong style={{ fontWeight: 500, color: "#888" }}>Projects</strong> and
+              use “Open in chat” to attach instructions to Jarvis and runs.
+            </div>
+          )}
+        </div>
+
         <div style={{ padding: "8px 12px 4px", flex: 1, overflow: "auto" }}>
           <div style={{
             display: "flex", justifyContent: "space-between",
@@ -259,7 +353,7 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
               <button
                 key={session.sessionId}
                 type="button"
-                onClick={() => router.push(`/chat?session=${encodeURIComponent(session.sessionId)}`)}
+                onClick={() => router.push(chatHref(session.sessionId))}
                 style={{
                   width: "100%",
                   display: "flex", alignItems: "center", gap: 10,
@@ -443,10 +537,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       background: "#fafaf8",
       fontFamily: "'Inter', sans-serif",
     }}>
-      <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-        rel="stylesheet"
-      />
       <Suspense fallback={(
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           <div style={{

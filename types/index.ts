@@ -1,69 +1,3 @@
-export type BrainCategory =
-  | "Research & Intelligence"
-  | "Business & Finance"
-  | "Jobs & Career"
-  | "Social Media"
-  | "Travel"
-  | "Finance"
-  | "Healthcare"
-  | "Legal"
-  | "Education"
-
-export type StepAction =
-  | "navigate"
-  | "click"
-  | "type"
-  | "wait"
-  | "scroll"
-  | "loop"
-  | "ai_handle"
-  | "extract"
-  | "notify"
-  | "fill_from_vault"
-
-export interface BrainStep {
-  id: string
-  action: StepAction
-  selector?: string
-  value?: string
-  url?: string
-  instruction?: string
-  max?: number
-  steps?: BrainStep[]
-  timeout?: number
-}
-
-export interface BrainInput {
-  key: string
-  label: string
-  placeholder: string
-  type: "text" | "url" | "number" | "password" | "textarea"
-  required: boolean
-  vaultKey?: string
-}
-
-export interface Brain {
-  id: string
-  name: string
-  description: string
-  author: string
-  category: BrainCategory
-  icon: string
-  version: string
-  verified: boolean
-  trending: boolean
-  featured: boolean
-  installs: number
-  rating: number
-  reviews: number
-  estimatedTime: string
-  tags: string[]
-  inputs: BrainInput[]
-  steps: BrainStep[]
-  createdAt: string
-  updatedAt: string
-}
-
 export type RunStatus =
   | "queued"
   | "starting"
@@ -78,6 +12,7 @@ export interface RunLog {
   message: string
 }
 
+/** brain_* fields mirror DB columns (`brain_id` etc.); used for the built-in research agent. */
 export interface Run {
   id: string
   userId: string
@@ -102,7 +37,7 @@ export interface Run {
 export interface RunResult {
   success: boolean
   summary: string
-  data?: Record<string, any>
+  data?: Record<string, unknown>
   exportUrl?: string
 }
 
@@ -124,14 +59,4 @@ export interface JarvisMessage {
   content: string
   timestamp: string
   runId?: string
-  brainSuggestion?: Brain
-}
-
-export interface AIScreenAnalysis {
-  observation: string
-  action: string
-  selector?: string
-  value?: string
-  confidence: number
-  reasoning: string
 }

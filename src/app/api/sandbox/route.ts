@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from "next/server"
-import { getBrainById } from "@/lib/brains/registry"
-import { executeBrain } from "@/lib/brains/executor"
+import { after, NextRequest, NextResponse } from "next/server"
+import { getAuthenticatedUser } from "@/lib/auth/session"
+import { loadProjectForUser } from "@/lib/projects/load-server"
+import { RESEARCH_AGENT, RESEARCH_MAX_STEPS } from "@/lib/research/constants"
+import { executeResearchRun } from "@/lib/research/executor"
 import { getCredits, deductCredit } from "@/lib/supabase/credits"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 import { Run, RunLog } from "@/types"
@@ -45,18 +47,59 @@ function rowToRun(row: Record<string, unknown>): Run {
   }
 }
 
+function normalizeInputs(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (v == null) continue
+    out[k] = typeof v === "string" ? v : String(v)
+  }
+  return out
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const supabase = getServiceSupabase()
-    const { brainId, inputs, userId } = await req.json()
-
-    if (!brainId || !userId) {
-      return NextResponse.json({ error: "brainId and userId required" }, { status: 400 })
+    const user = await getAuthenticatedUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const brain = getBrainById(brainId)
-    if (!brain) {
-      return NextResponse.json({ error: "Brain not found" }, { status: 404 })
+    const supabase = getServiceSupabase()
+    const body = await req.json()
+    const inputs = normalizeInputs(body.inputs)
+    const rawProjectId = body.projectId
+
+    if (typeof rawProjectId === "string" && rawProjectId.length > 0) {
+      const proj = await loadProjectForUser(supabase, user.id, rawProjectId)
+      if (proj) {
+        inputs.project_name = proj.name
+        inputs.project_instructions = proj.instructions
+        inputs.project_context = proj.context
+      }
+    }
+
+    const goal =
+      inputs.user_goal?.trim() ||
+      inputs.query?.trim() ||
+      inputs.goal?.trim()
+
+    if (!goal) {
+      return NextResponse.json(
+        { error: "Provide inputs with user_goal, query, or goal" },
+        { status: 400 }
+      )
+    }
+
+    if (!inputs.user_goal?.trim()) inputs.user_goal = goal
+    if (!inputs.query?.trim()) inputs.query = goal
+
+    const userId = user.id
+
+    if (!process.env.GEMINI_API_KEY?.trim()) {
+      return NextResponse.json(
+        { error: "Research is unavailable: GEMINI_API_KEY is not configured." },
+        { status: 503 }
+      )
     }
 
     const { canRun, credits, nextRefill } = await getCredits(userId)
@@ -76,8 +119,30 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    const runId = uuidv4()
+    const run: Run = {
+      id: runId,
+      userId,
+      brainId: RESEARCH_AGENT.id,
+      brainName: RESEARCH_AGENT.name,
+      brainIcon: RESEARCH_AGENT.icon,
+      status: "queued",
+      progress: 0,
+      totalSteps: RESEARCH_MAX_STEPS,
+      currentStep: "Queued...",
+      logs: [],
+      inputs,
+      startedAt: new Date().toISOString(),
+    }
+
+    const { error } = await supabase.from("runs").insert(insertRunPayload(run))
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
     const deducted = await deductCredit(userId)
     if (!deducted) {
+      await supabase.from("runs").delete().eq("id", runId).eq("user_id", userId)
       return NextResponse.json(
         {
           error: "No credits left.",
@@ -88,30 +153,9 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Create run record
-    const runId = uuidv4()
-    const run: Run = {
-      id: runId,
-      userId,
-      brainId,
-      brainName: brain.name,
-      brainIcon: brain.icon,
-      status: "queued",
-      progress: 0,
-      totalSteps: brain.steps.length,
-      currentStep: "Queued...",
-      logs: [],
-      inputs: inputs ?? {},
-      startedAt: new Date().toISOString(),
-    }
-
-    const { error } = await supabase.from("runs").insert(insertRunPayload(run))
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
-    }
-
-    // Execute in background — don't await
-    executeInBackground(run, brain, userId)
+    after(async () => {
+      await executeInBackground(run, userId)
+    })
 
     return NextResponse.json({ runId, status: "queued" })
   } catch (err: unknown) {
@@ -121,9 +165,13 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
+  const user = await getAuthenticatedUser()
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
   const supabase = getServiceSupabase()
   const { searchParams } = new URL(req.url)
-  const userId = searchParams.get("userId")
   const runId = searchParams.get("runId")
 
   if (runId) {
@@ -133,26 +181,26 @@ export async function GET(req: NextRequest) {
       .eq("id", runId)
       .single()
     if (!data) return NextResponse.json(null, { status: 404 })
-    return NextResponse.json(rowToRun(data as Record<string, unknown>))
+    const row = data as Record<string, unknown>
+    if (String(row.user_id) !== user.id) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 })
+    }
+    return NextResponse.json(rowToRun(row))
   }
 
-  if (userId) {
-    const { data } = await supabase
-      .from("runs")
-      .select("*")
-      .eq("user_id", userId)
-      .order("started_at", { ascending: false })
-      .limit(20)
-    return NextResponse.json((data ?? []).map((r) => rowToRun(r as Record<string, unknown>)))
-  }
-
-  return NextResponse.json({ error: "userId required" }, { status: 400 })
+  const { data } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("user_id", user.id)
+    .order("started_at", { ascending: false })
+    .limit(20)
+  return NextResponse.json((data ?? []).map((r) => rowToRun(r as Record<string, unknown>)))
 }
 
-async function executeInBackground(run: Run, brain: Parameters<typeof executeBrain>[1], userId: string) {
+async function executeInBackground(run: Run, userId: string) {
   const supabase = getServiceSupabase()
   try {
-    await executeBrain(run, brain, userId, async (update) => {
+    await executeResearchRun(run, userId, async (update) => {
       const patch: Record<string, unknown> = {}
 
       if (update.status) patch.status = update.status

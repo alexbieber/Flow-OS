@@ -11,7 +11,7 @@
 
 ---
 
-**FlowOS** is an open-source AI workspace where **Jarvis** chats with you, decides when to run deep research, and executes **Brains** inside isolated **[E2B](https://e2b.dev)** sandboxes. Results land in the chat as structured reports — with optional live desktop streaming when you use the desktop template.
+**FlowOS** is an open-source AI workspace where **Jarvis** chats with you, decides when to run deep **web research**, and executes a sandboxed **research agent** inside **[E2B](https://e2b.dev)**. Results land in the chat as structured reports — with optional live desktop streaming when you use the desktop template.
 
 If you want a **Manus-class loop** (search → open results → read pages → synthesize), the agent uses **Python + BeautifulSoup** over HTTP inside the sandbox — fast boots, no browser gymnastics for the default terminal path.
 
@@ -22,10 +22,13 @@ If you want a **Manus-class loop** (search → open results → read pages → s
 | Capability | Detail |
 |------------|--------|
 | **Jarvis** | Gemini-powered intent: chit-chat vs. kick off a research run |
-| **Brains** | Pluggable automations; registry-driven steps and inputs |
+| **Research agent** | Plan → wide parallel search → **fetch or Playwright Chromium** (JS sites, session profile, **screenshot + Gemini vision**) → Python in sandbox → synthesis |
 | **Sandboxes** | E2B terminal (default) or custom desktop template + stream |
 | **Persistence** | Supabase for runs, Jarvis messages, vault hooks |
-| **UI** | Dashboard chat, runs history, marketplace, HTML export for reports |
+| **Projects** | Saved instructions + reference context, injected into Jarvis and each research run (Manus-style workspace) |
+| **UI** | Dashboard chat, runs history, HTML export for reports |
+
+**Gemini usage:** Jarvis uses **one** `gemini-2.0-flash` call per chat turn (not tied to app credits). A **research run** charges **one credit** only after the run row is stored; it then uses Gemini for an upfront plan, about one decision call per agent step (with limited retries if JSON parsing fails), optional `think` / vision (`screenshot` + `analyze`), and sometimes a final report pass. Research **POST** returns **503** if `GEMINI_API_KEY` is missing so credits are not spent on a doomed run.
 
 ---
 
@@ -83,7 +86,7 @@ Create **`.env.local`** (never commit secrets):
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase (API routes) |
 
-Apply SQL under `supabase/` in the Supabase SQL editor (schema + optional migrations).
+Apply SQL under `supabase/` in the Supabase SQL editor (schema + `flowos_projects.sql` for Projects).
 
 ---
 
@@ -114,7 +117,7 @@ Wire the built template ID in sandbox code when using the desktop SDK path.
 
 ```
 src/app/           # App Router — dashboard, chat, API routes
-lib/brains/        # Brain executor + agent loop
+lib/research/      # Research agent loop + prompts
 lib/sandbox/       # E2B terminal (and related helpers)
 lib/ai/            # Gemini helpers
 supabase/          # SQL schema & migrations

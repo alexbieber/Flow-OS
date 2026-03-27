@@ -1,75 +1,58 @@
 import { NextRequest, NextResponse } from "next/server"
-import { GoogleGenerativeAI } from "@google/generative-ai"
-import { understandIntent } from "@/lib/ai/gemini"
-import { getBrainById, getBrainSummaries } from "@/lib/brains/registry"
+import { completeJarvisTurn } from "@/lib/ai/jarvis-turn"
+import { getAuthenticatedUser } from "@/lib/auth/session"
+import { loadProjectBlockForUser } from "@/lib/projects/load-server"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 import { v4 as uuidv4 } from "uuid"
 
+const MAX_MESSAGE_CHARS = 48_000
+
 export async function POST(req: NextRequest) {
   try {
-    const supabase = getServiceSupabase()
-    const { message, userId, sessionId: rawSessionId } = await req.json()
+    const user = await getAuthenticatedUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
 
-    if (!message || !userId) {
-      return NextResponse.json({ error: "message and userId required" }, { status: 400 })
+    const supabase = getServiceSupabase()
+    const body = await req.json()
+    const { message, sessionId: rawSessionId, projectId: rawProjectId } = body
+
+    if (!message || typeof message !== "string") {
+      return NextResponse.json({ error: "message required" }, { status: 400 })
+    }
+
+    const trimmed = message.slice(0, MAX_MESSAGE_CHARS)
+    if (!trimmed.trim()) {
+      return NextResponse.json({ error: "message required" }, { status: 400 })
     }
 
     const sessionId = typeof rawSessionId === "string" && rawSessionId.length > 0
       ? rawSessionId
       : "default"
 
+    const userId = user.id
+
     await supabase.from("jarvis_messages").insert({
       id: uuidv4(),
       user_id: userId,
       session_id: sessionId,
       role: "user",
-      content: message,
+      content: trimmed,
       created_at: new Date().toISOString(),
     })
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" })
-
-    const safe = String(message).replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-
-    const decision = await model.generateContent(`
-You are Jarvis, an AI agent assistant like Manus.
-
-User message: "${safe}"
-
-Decide:
-1. Is this an actionable research/analysis task that needs agent execution?
-2. Or is it just conversation (hi, okay, thanks, what can you do, etc)?
-
-Respond ONLY with JSON:
-{
-  "shouldRunAgent": true/false,
-  "reply": "your response to user (1-2 sentences max)"
-}
-
-If shouldRunAgent is true: reply should be like "On it. I'll research [topic] now."
-If shouldRunAgent is false: reply should answer conversationally.
-`)
-
-    const text = decision.response.text()
-    const clean = text.replace(/```json|```/g, "").trim()
-    let parsed: { shouldRunAgent: boolean; reply: string }
-
-    try {
-      parsed = JSON.parse(clean)
-    } catch {
-      parsed = { shouldRunAgent: false, reply: text.slice(0, 200) }
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json({ error: "AI is not configured" }, { status: 503 })
     }
 
-    let brainId: string | null = null
-    if (parsed.shouldRunAgent) {
-      const intent = await understandIntent(message, getBrainSummaries())
-      const candidate =
-        intent.brainId && getBrainById(intent.brainId)
-          ? intent.brainId
-          : "market-research-report"
-      brainId = getBrainById(candidate) ? candidate : "market-research-report"
+    let projectBlock: string | undefined
+    if (typeof rawProjectId === "string" && rawProjectId.length > 0) {
+      const block = await loadProjectBlockForUser(supabase, userId, rawProjectId)
+      if (block) projectBlock = block
     }
+
+    const turn = await completeJarvisTurn(trimmed, { projectBlock })
 
     const jarvisMsgId = uuidv4()
     const jarvisTs = new Date().toISOString()
@@ -79,17 +62,17 @@ If shouldRunAgent is false: reply should answer conversationally.
       user_id: userId,
       session_id: sessionId,
       role: "jarvis",
-      content: parsed.reply,
+      content: turn.reply,
       created_at: jarvisTs,
     })
 
     return NextResponse.json({
       id: jarvisMsgId,
       role: "jarvis",
-      content: parsed.reply,
+      content: turn.reply,
       timestamp: jarvisTs,
-      shouldRunAgent: parsed.shouldRunAgent,
-      brainId,
+      shouldRunAgent: turn.shouldRunAgent,
+      researchGoal: turn.researchGoal,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Unknown error"
@@ -98,19 +81,19 @@ If shouldRunAgent is false: reply should answer conversationally.
 }
 
 export async function GET(req: NextRequest) {
+  const user = await getAuthenticatedUser()
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
   const supabase = getServiceSupabase()
   const { searchParams } = new URL(req.url)
-  const userId = searchParams.get("userId")
   const sessionId = searchParams.get("sessionId")
-
-  if (!userId) {
-    return NextResponse.json({ error: "userId required" }, { status: 400 })
-  }
 
   let query = supabase
     .from("jarvis_messages")
     .select("*")
-    .eq("user_id", userId)
+    .eq("user_id", user.id)
     .order("created_at", { ascending: true })
     .limit(100)
 
@@ -133,11 +116,16 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
-    const supabase = getServiceSupabase()
-    const { userId, sessionId: rawSessionId, role, content, runId } = await req.json()
+    const user = await getAuthenticatedUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
 
-    if (!userId || !content) {
-      return NextResponse.json({ error: "userId and content required" }, { status: 400 })
+    const supabase = getServiceSupabase()
+    const { sessionId: rawSessionId, role, content, runId } = await req.json()
+
+    if (!content || typeof content !== "string") {
+      return NextResponse.json({ error: "content required" }, { status: 400 })
     }
 
     const sessionId = typeof rawSessionId === "string" && rawSessionId.length > 0
@@ -146,10 +134,10 @@ export async function PUT(req: NextRequest) {
 
     await supabase.from("jarvis_messages").insert({
       id: uuidv4(),
-      user_id: userId,
+      user_id: user.id,
       session_id: sessionId,
       role: role ?? "jarvis",
-      content,
+      content: content.slice(0, MAX_MESSAGE_CHARS),
       run_id: runId ?? null,
       created_at: new Date().toISOString(),
     })
@@ -162,25 +150,29 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const user = await getAuthenticatedUser()
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
   const supabase = getServiceSupabase()
   const { searchParams } = new URL(req.url)
-  const userId = searchParams.get("userId")
   const sessionId = searchParams.get("sessionId")
 
-  if (!userId || !sessionId) {
-    return NextResponse.json({ error: "userId and sessionId required" }, { status: 400 })
+  if (!sessionId) {
+    return NextResponse.json({ error: "sessionId required" }, { status: 400 })
   }
 
   const del = sessionId === "default"
     ? supabase
         .from("jarvis_messages")
         .delete()
-        .eq("user_id", userId)
+        .eq("user_id", user.id)
         .or("session_id.eq.default,session_id.is.null")
     : supabase
         .from("jarvis_messages")
         .delete()
-        .eq("user_id", userId)
+        .eq("user_id", user.id)
         .eq("session_id", sessionId)
 
   const { error } = await del

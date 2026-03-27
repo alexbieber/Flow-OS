@@ -60,23 +60,33 @@ export async function getCredits(userId: string): Promise<{
 export async function deductCredit(userId: string): Promise<boolean> {
   const supabase = getServiceSupabase()
 
-  const { data } = await supabase
-    .from("user_credits")
-    .select("credits, total_runs")
-    .eq("user_id", userId)
-    .single()
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data } = await supabase
+      .from("user_credits")
+      .select("credits, total_runs")
+      .eq("user_id", userId)
+      .single()
 
-  if (!data || Number(data.credits) <= 0) return false
+    if (!data || Number(data.credits) <= 0) return false
 
-  const totalRuns = Number(data.total_runs ?? 0)
+    const currentCredits = Number(data.credits)
+    const totalRuns = Number(data.total_runs ?? 0)
 
-  await supabase
-    .from("user_credits")
-    .update({
-      credits: Number(data.credits) - 1,
-      total_runs: totalRuns + 1,
-    })
-    .eq("user_id", userId)
+    const { data: updatedRows, error } = await supabase
+      .from("user_credits")
+      .update({
+        credits: currentCredits - 1,
+        total_runs: totalRuns + 1,
+      })
+      .eq("user_id", userId)
+      .eq("credits", currentCredits)
+      .eq("total_runs", totalRuns)
+      .select("user_id")
 
-  return true
+    if (!error && updatedRows && updatedRows.length > 0) {
+      return true
+    }
+  }
+
+  return false
 }
