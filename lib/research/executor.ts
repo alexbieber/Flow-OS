@@ -6,6 +6,12 @@ import { parseBrowserInput } from "@/lib/research/browser-input"
 import { parseAgentDecision } from "@/lib/research/parse-agent"
 import { parseWideQueries } from "@/lib/research/wide-search"
 import { Run, RunLog, RunStatus } from "@/types"
+import { runServerSearch } from "@/lib/research/server-search"
+import {
+  fetchTopUrlBodiesInSandbox,
+  parseSearchOutputUrls,
+  scrapeSearchInSandbox,
+} from "@/lib/research/scrape-search-sandbox"
 import { createTerminalSandbox, runCommand, killSandbox } from "@/lib/sandbox/e2b"
 import { runBrowserOp } from "@/lib/sandbox/browser-playwright"
 
@@ -62,77 +68,58 @@ Each step should be actionable (e.g. search terms, URLs to prioritize, analysis 
   return trimmed
 }
 
-async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
-  const result = await runCommand(
-    sandbox,
-    `python3 - << 'PYEOF'
-import requests
-from bs4 import BeautifulSoup
-import urllib.parse
-import re
-
-query = ${JSON.stringify(query)}
-headers = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-    "Accept": "text/html,application/xhtml+xml",
+function mergeUrls(primary: string[], extra: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const u of [...primary, ...extra]) {
+    const t = u.trim()
+    if (!t.startsWith("http")) continue
+    if (seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+    if (out.length >= 10) break
+  }
+  return out
 }
 
-try:
-    url = "https://www.google.com/search?q=" + urllib.parse.quote(query) + "&num=8&hl=en"
-    r = requests.get(url, headers=headers, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
+async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
+  const chunks: string[] = []
+  let urlList: string[] = []
 
-    results = []
-    urls = []
+  const api = await runServerSearch(query).catch(() => null)
+  if (api) {
+    chunks.push(api.serpBlock)
+    urlList = [...api.urls]
+  }
 
-    for g in soup.select("div.g")[:6]:
-        title = g.find("h3")
-        if not title:
-            continue
-        snippet_el = g.select_one(".VwiC3b, .IsZvec")
-        snippet = snippet_el.get_text(strip=True)[:200] if snippet_el else ""
-        link = g.find("a", href=True)
-        href = link["href"] if link else ""
-        if href.startswith("/url?q="):
-            href = href[7:].split("&")[0]
-        results.append(f"TITLE: {title.get_text(strip=True)}")
-        if snippet:
-            results.append(f"SNIPPET: {snippet}")
-        if href.startswith("http") and "google" not in href:
-            results.append(f"URL: {href}")
-            urls.append(href)
-        results.append("---")
+  const thinApi =
+    !api ||
+    api.urls.length < 2 ||
+    api.serpBlock.length < 200
 
-    print("SEARCH_RESULTS:")
-    print("\\n".join(results[:40]))
+  let scrapeText = ""
+  if (thinApi) {
+    scrapeText = (await scrapeSearchInSandbox(sandbox, query).catch(() => "")) ?? ""
+    if (scrapeText.trim()) {
+      if (api) chunks.push("--- HTML_SCRAPE (supplement) ---\n" + scrapeText)
+      else chunks.push(scrapeText)
+      urlList = mergeUrls(urlList, parseSearchOutputUrls(scrapeText))
+    }
+  }
 
-    for url in urls[:2]:
-        try:
-            print(f"\\nREADING: {url}")
-            pr = requests.get(url, headers=headers, timeout=10)
-            psoup = BeautifulSoup(pr.text, "html.parser")
-            for tag in psoup(["script","style","nav","footer","header","aside"]):
-                tag.decompose()
-            main = psoup.find("main") or psoup.find("article") or psoup.find("body")
-            if main:
-                text = re.sub(r"\\s+", " ", main.get_text(separator=" ", strip=True))
-                print(f"CONTENT: {text[:1500]}")
-        except Exception as e:
-            print(f"Could not read {url}: {e}")
+  if (urlList.length > 0) {
+    const bodies = await fetchTopUrlBodiesInSandbox(sandbox, urlList, 2).catch(() => "")
+    if (bodies?.trim()) chunks.push(bodies.trim())
+  }
 
-except Exception as e:
-    print(f"Search error: {e}")
-PYEOF`,
-    45000
-  )
-
-  const out = (result ?? "").trim()
+  const out = chunks.filter(Boolean).join("\n\n").trim()
   if (out.length > 100) {
-    return out.slice(0, 4000)
+    return out.slice(0, 12_000)
   }
 
   return (
-    "[No usable live web search results were retrieved (blocked, empty, or page layout changed). " +
+    "[No usable live web search results were retrieved (blocked, empty, or no API/scrape paths succeeded). " +
+    "If SERPAPI_API_KEY, BRAVE_SEARCH_API_KEY, or GOOGLE_CSE_* is set on the server, searches are much more reliable. " +
     "The final report must say clearly that live search failed — do not invent URLs, quotes, or sources.]\n" +
     (out || "(empty)")
   )
@@ -147,10 +134,10 @@ async function toolWideSearch(sandbox: Sandbox, raw: string): Promise<string> {
   await Promise.all(
     queries.map(async (q, i) => {
       const r = await toolSearch(sandbox, q)
-      chunks[i] = `### Angle ${i + 1}: ${q.slice(0, 120)}\n${r.slice(0, 3500)}`
+      chunks[i] = `### Angle ${i + 1}: ${q.slice(0, 120)}\n${r.slice(0, 5500)}`
     }),
   )
-  return chunks.filter(Boolean).join("\n\n---\n\n").slice(0, 14000)
+  return chunks.filter(Boolean).join("\n\n---\n\n").slice(0, 22_000)
 }
 
 async function toolFetch(sandbox: Sandbox, url: string): Promise<string> {
@@ -267,8 +254,8 @@ TOOLS:
 
 RULES:
 - Prefer wide_search early for broad topics; use search for tight follow-ups.
-- Use fetch for static HTML; use browser when the site needs JavaScript or you need a real session.
-- Use execute for light data work (counts, parsing, simple math) — not for secrets.
+- Use fetch for static HTML; use browser when the site needs JavaScript or you need a real session (e.g. if HTTP search scraped nothing, open bing.com/search or a target URL in browser).
+- Use execute only for real Python on data you already have — NEVER to skip work, fake “permissions”, or print that you cannot scrape.
 - NEVER call done before step 4.
 - Step ${stepCount}/${maxSteps}.
 ${stepCount < 4 ? "- DO NOT CALL DONE YET." : ""}

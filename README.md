@@ -30,6 +30,8 @@ If you want a **Manus-class loop** (search → open results → read pages → s
 
 **Gemini usage:** Jarvis uses **one** `gemini-2.0-flash` call per chat turn (not tied to app credits). A **research run** charges **one credit** only after the run row is stored; it then uses Gemini for an upfront plan, about one decision call per agent step (with limited retries if JSON parsing fails), optional `think` / vision (`screenshot` + `analyze`), and sometimes a final report pass. Research **POST** returns **503** if `GEMINI_API_KEY` is missing so credits are not spent on a doomed run.
 
+**Web search:** Each `search` / `wide_search` step calls hosted **SERP APIs first** when `SERPAPI_API_KEY`, `BRAVE_SEARCH_API_KEY`, or `GOOGLE_CSE_*` is set (keys never enter E2B), then **HTML scraping** (Google → Bing → DuckDuckGo) inside the sandbox if results are thin, then fetches up to **two** result pages for text. For production reliability on Vercel, configure at least one SERP provider.
+
 ---
 
 ## Architecture
@@ -81,6 +83,9 @@ Create **`.env.local`** (never commit secrets):
 | Variable | Purpose |
 |----------|---------|
 | `GEMINI_API_KEY` | Google Generative AI (Jarvis + agent) |
+| `SERPAPI_API_KEY` | *(Optional)* SerpAPI for reliable web search from the server |
+| `BRAVE_SEARCH_API_KEY` | *(Optional)* [Brave Search API](https://brave.com/search/api/) |
+| `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX` | *(Optional)* Google Programmable Search (JSON API) |
 | `E2B_API_KEY` | E2B sandbox create / commands |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
