@@ -7,11 +7,28 @@ export interface JarvisTurn {
   researchGoal: string
 }
 
+export interface JarvisHistoryTurn {
+  role: "user" | "jarvis" | "system"
+  content: string
+}
+
+const PLACEHOLDER_REPLY_RE =
+  /\[insert\b|\bplaceholder\b|lorem ipsum|the report you just received summarized/i
+
+function sanitizeReply(reply: string, fallback: string): string {
+  const cleaned = reply.trim().replace(/\s+/g, " ")
+  if (!cleaned) return fallback
+  if (PLACEHOLDER_REPLY_RE.test(cleaned)) return fallback
+  return cleaned.slice(0, 2000)
+}
+
 function fallbackTurn(fallbackReply: string): JarvisTurn {
-  const t = fallbackReply.trim()
+  const fallback =
+    "I can help, but my previous response was low-confidence. Ask me again in one clear sentence and I will answer directly."
+  const t = sanitizeReply(fallbackReply, fallback)
   return {
     shouldRunAgent: false,
-    reply: t.slice(0, 2000) || "Could you say that another way?",
+    reply: t || fallback,
     researchGoal: "",
   }
 }
@@ -29,7 +46,7 @@ function coerceTurn(parsed: unknown, rawText: string, userMessage: string): Jarv
       : shouldRunAgent
         ? "On it — starting web research now."
         : rawText.slice(0, 500).trim() || "Okay."
-  reply = reply.slice(0, 2000)
+  reply = sanitizeReply(reply, shouldRunAgent ? "On it — starting web research now." : "I can help with that.")
 
   let researchGoal =
     typeof o.researchGoal === "string" && o.researchGoal.trim()
@@ -45,7 +62,7 @@ function coerceTurn(parsed: unknown, rawText: string, userMessage: string): Jarv
 
 export async function completeJarvisTurn(
   userMessage: string,
-  options?: { projectBlock?: string }
+  options?: { projectBlock?: string; recentHistory?: JarvisHistoryTurn[] }
 ): Promise<JarvisTurn> {
   const key = process.env.GEMINI_API_KEY
   if (!key) throw new Error("GEMINI_API_KEY is not set")
@@ -61,9 +78,17 @@ export async function completeJarvisTurn(
       `\n\n---\nActive workspace project (always respect):\n${options.projectBlock.trim()}\n---\n`
     : ""
 
+  const historySection =
+    options?.recentHistory && options.recentHistory.length > 0
+      ? `\n\nRecent conversation (oldest to newest):\n${options.recentHistory
+          .map((m) => `- ${m.role}: ${m.content.trim().replace(/\s+/g, " ").slice(0, 600)}`)
+          .join("\n")}\n`
+      : ""
+
   const text = await model.generateContent(`
 You are Jarvis, an AI research assistant. The user's message is provided as a JSON string below (verbatim).
 ${projectSection}
+${historySection}
 User message: ${JSON.stringify(userMessage)}
 
 Decide in one pass:
@@ -71,6 +96,7 @@ Decide in one pass:
 2) If it is chit-chat, thanks, meta questions, or needs no web run → shouldRunAgent false.
 
 If shouldRunAgent is true: reply must be 1–2 short sentences acknowledging you will research; researchGoal must be a clear, standalone objective (what to find out), not a reply to the user.
+If shouldRunAgent is false: answer directly from available context. NEVER use placeholders like "[insert topic]" or template text.
 
 Respond ONLY with JSON:
 {

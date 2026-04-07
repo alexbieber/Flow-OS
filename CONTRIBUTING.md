@@ -7,7 +7,7 @@ Thanks for helping improve FlowOS.
 1. **Open an issue** first for larger changes (architecture, new integrations) so we can align.
 2. **Fork** the repo and create a **focused branch** (`fix/…`, `feat/…`).
 3. Keep PRs **small and reviewable** — one concern per PR when possible.
-4. Run **`npm run lint`** and **`npx tsc --noEmit`** before pushing.
+4. Run **`npm run lint`** and **`npm run typecheck`** before pushing.
 5. **Do not commit** `.env.local` or API keys.
 
 ## Code style

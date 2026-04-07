@@ -1,25 +1,48 @@
 "use client"
 
-import { useState } from "react"
-import { createBrowserClient } from "@supabase/ssr"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
+import { getBrowserSupabase } from "@/lib/supabase/browser"
 
-const supabase = createBrowserClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+const supabase = getBrowserSupabase()
 
 export default function LoginPage() {
+  const router = useRouter()
   const [email, setEmail] = useState("")
   const [loading, setLoading] = useState(false)
   const [sent, setSent] = useState(false)
   const [error, setError] = useState("")
 
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!active || !user) return
+
+      const nextParam = new URLSearchParams(window.location.search).get("next")
+      const target =
+        nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
+          ? nextParam
+          : "/chat"
+      router.replace(target)
+    })()
+
+    return () => {
+      active = false
+    }
+  }, [router])
+
   const signInWithGoogle = async () => {
+    setError("")
     setLoading(true)
+    const nextParam = new URLSearchParams(window.location.search).get("next")
+    const callbackUrl = `${window.location.origin}/auth/callback${nextParam ? `?next=${encodeURIComponent(nextParam)}` : ""}`
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
+        redirectTo: callbackUrl,
       },
     })
     if (oauthError) setError(oauthError.message)
@@ -28,11 +51,14 @@ export default function LoginPage() {
 
   const signInWithEmail = async () => {
     if (!email.trim()) return
+    setError("")
     setLoading(true)
+    const nextParam = new URLSearchParams(window.location.search).get("next")
+    const callbackUrl = `${window.location.origin}/auth/callback${nextParam ? `?next=${encodeURIComponent(nextParam)}` : ""}`
     const { error: otpError } = await supabase.auth.signInWithOtp({
       email,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
+        emailRedirectTo: callbackUrl,
       },
     })
     if (otpError) {

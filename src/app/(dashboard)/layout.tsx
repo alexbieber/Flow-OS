@@ -2,8 +2,8 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { createBrowserClient } from "@supabase/ssr"
 import { SESSIONS_REFRESH_EVENT } from "@/lib/constants/demo-user"
+import { getBrowserSupabase } from "@/lib/supabase/browser"
 
 interface Session {
   sessionId: string
@@ -42,11 +42,7 @@ function SidebarWithNav({ children }: { children: React.ReactNode }) {
   const [showUserMenu, setShowUserMenu] = useState(false)
 
   const supabase = useMemo(
-    () =>
-      createBrowserClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-      ),
+    () => getBrowserSupabase(),
     []
   )
 

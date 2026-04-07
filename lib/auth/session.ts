@@ -22,8 +22,12 @@ export async function getAuthenticatedUser(): Promise<User | null> {
     },
   })
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  return user
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    return user
+  } catch {
+    return null
+  }
 }

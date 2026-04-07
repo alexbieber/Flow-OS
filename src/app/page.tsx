@@ -1,6 +1,10 @@
 import Link from "next/link"
+import { getAuthenticatedUser } from "@/lib/auth/session"
 
-export default function Home() {
+export default async function Home() {
+  const user = await getAuthenticatedUser()
+  const primaryHref = user ? "/chat" : "/login"
+  const primaryLabel = user ? "Open app" : "Sign in"
   return (
     <div
       style={{
@@ -48,15 +52,17 @@ export default function Home() {
         </div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           <Link
-            href="/login"
+            href={primaryHref}
             style={{
               fontSize: 14,
-              color: "#555",
+              color: user ? "#fff" : "#555",
+              background: user ? "#111" : "transparent",
               textDecoration: "none",
               padding: "8px 14px",
+              borderRadius: user ? 8 : 0,
             }}
           >
-            Sign in
+            {primaryLabel}
           </Link>
           <Link
             href="/chat"

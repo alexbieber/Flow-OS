@@ -1,11 +1,47 @@
 import { NextRequest, NextResponse } from "next/server"
-import { completeJarvisTurn } from "@/lib/ai/jarvis-turn"
+import { completeJarvisTurn, type JarvisHistoryTurn } from "@/lib/ai/jarvis-turn"
 import { getAuthenticatedUser } from "@/lib/auth/session"
 import { loadProjectBlockForUser } from "@/lib/projects/load-server"
 import { getServiceSupabase } from "@/lib/supabase/admin"
 import { v4 as uuidv4 } from "uuid"
 
 const MAX_MESSAGE_CHARS = 48_000
+const ALLOWED_PUT_ROLES = new Set(["jarvis", "user", "system"])
+const HISTORY_LIMIT = 10
+
+async function loadRecentHistory(
+  userId: string,
+  sessionId: string
+): Promise<JarvisHistoryTurn[]> {
+  const supabase = getServiceSupabase()
+  let query = supabase
+    .from("jarvis_messages")
+    .select("role, content, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(HISTORY_LIMIT)
+
+  if (sessionId === "default") {
+    query = query.or("session_id.eq.default,session_id.is.null")
+  } else {
+    query = query.eq("session_id", sessionId)
+  }
+
+  const { data } = await query
+  if (!Array.isArray(data)) return []
+
+  return data
+    .slice()
+    .reverse()
+    .map((row) => ({
+      role:
+        row.role === "user" || row.role === "system" || row.role === "jarvis"
+          ? row.role
+          : "jarvis",
+      content: String(row.content ?? "").slice(0, 1200),
+    }))
+    .filter((m) => m.content.trim().length > 0)
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,7 +69,9 @@ export async function POST(req: NextRequest) {
 
     const userId = user.id
 
-    await supabase.from("jarvis_messages").insert({
+    const historyBefore = await loadRecentHistory(userId, sessionId)
+
+    const { error: userInsertError } = await supabase.from("jarvis_messages").insert({
       id: uuidv4(),
       user_id: userId,
       session_id: sessionId,
@@ -41,6 +79,9 @@ export async function POST(req: NextRequest) {
       content: trimmed,
       created_at: new Date().toISOString(),
     })
+    if (userInsertError) {
+      return NextResponse.json({ error: userInsertError.message }, { status: 500 })
+    }
 
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json({ error: "AI is not configured" }, { status: 503 })
@@ -52,12 +93,15 @@ export async function POST(req: NextRequest) {
       if (block) projectBlock = block
     }
 
-    const turn = await completeJarvisTurn(trimmed, { projectBlock })
+    const turn = await completeJarvisTurn(trimmed, {
+      projectBlock,
+      recentHistory: [...historyBefore, { role: "user", content: trimmed }],
+    })
 
     const jarvisMsgId = uuidv4()
     const jarvisTs = new Date().toISOString()
 
-    await supabase.from("jarvis_messages").insert({
+    const { error: assistantInsertError } = await supabase.from("jarvis_messages").insert({
       id: jarvisMsgId,
       user_id: userId,
       session_id: sessionId,
@@ -65,6 +109,9 @@ export async function POST(req: NextRequest) {
       content: turn.reply,
       created_at: jarvisTs,
     })
+    if (assistantInsertError) {
+      return NextResponse.json({ error: assistantInsertError.message }, { status: 500 })
+    }
 
     return NextResponse.json({
       id: jarvisMsgId,
@@ -132,15 +179,21 @@ export async function PUT(req: NextRequest) {
       ? rawSessionId
       : "default"
 
-    await supabase.from("jarvis_messages").insert({
+    const resolvedRole =
+      typeof role === "string" && ALLOWED_PUT_ROLES.has(role) ? role : "jarvis"
+
+    const { error: insertError } = await supabase.from("jarvis_messages").insert({
       id: uuidv4(),
       user_id: user.id,
       session_id: sessionId,
-      role: role ?? "jarvis",
+      role: resolvedRole,
       content: content.slice(0, MAX_MESSAGE_CHARS),
       run_id: runId ?? null,
       created_at: new Date().toISOString(),
     })
+    if (insertError) {
+      return NextResponse.json({ error: insertError.message }, { status: 500 })
+    }
 
     return NextResponse.json({ success: true })
   } catch (err: unknown) {

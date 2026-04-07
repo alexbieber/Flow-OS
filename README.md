@@ -70,7 +70,10 @@ flowchart LR
 git clone https://github.com/alexbieber/Flow-OS.git
 cd Flow-OS
 npm install
-cp .env.example .env.local   # if you add one; otherwise create .env.local manually
+# macOS/Linux:
+cp .env.example .env.local
+# Windows PowerShell:
+Copy-Item .env.example .env.local
 npm run dev
 ```
 
@@ -91,7 +94,21 @@ Create **`.env.local`** (never commit secrets):
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase (API routes) |
 
-Apply SQL under `supabase/` in the Supabase SQL editor (schema + `flowos_projects.sql` for Projects).
+### Supabase SQL bootstrap (required order)
+
+Run these files in the Supabase SQL editor, in order:
+
+1. `supabase/schema.sql`
+2. `supabase/sql/jarvis_messages_session_id.sql`
+3. `supabase/sql/user_credits.sql`
+4. `supabase/sql/flowos_projects.sql`
+
+Feature dependencies:
+
+- `Projects` requires `flowos_projects`.
+- `Credits` (`/api/credits`, research spending) requires `user_credits`.
+- `Session chat` (`/api/jarvis`, `/api/sessions`) requires `jarvis_messages.session_id`.
+- `Runs / Vault / base messages` come from `schema.sql`.
 
 ---
 
@@ -115,6 +132,27 @@ Wire the built template ID in sandbox code when using the desktop SDK path.
 | `npm run build` | Production build |
 | `npm run start` | Start production server |
 | `npm run lint` | ESLint |
+| `npm run typecheck` | TypeScript check (`tsc --noEmit`) |
+
+---
+
+## Stabilization checklist
+
+Before opening a PR, run:
+
+```bash
+npm run lint
+npm run typecheck
+npm run build
+```
+
+Manual happy-path verification:
+
+1. Sign in from `/login` (Google or email link) and confirm redirect back to the intended route.
+2. Create a project in `/projects`, then edit and delete it.
+3. Click **Open in chat** from a project and confirm chat URL includes `?project=...`.
+4. Refresh and confirm project list + sessions load without 401 loops.
+5. Run one research task from chat and verify credits/session endpoints remain healthy.
 
 ---
 

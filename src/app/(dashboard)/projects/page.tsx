@@ -4,6 +4,15 @@ import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { FlowosProject } from "@/lib/projects/types"
 
+async function readApiError(res: Response, fallback: string) {
+  try {
+    const raw = (await res.json()) as { error?: unknown }
+    return typeof raw.error === "string" ? raw.error : fallback
+  } catch {
+    return fallback
+  }
+}
+
 export default function ProjectsPage() {
   const router = useRouter()
   const [list, setList] = useState<FlowosProject[]>([])
@@ -25,7 +34,11 @@ export default function ProjectsPage() {
     try {
       const res = await fetch("/api/projects")
       if (!res.ok) {
-        setError(res.status === 401 ? "Sign in required." : "Could not load projects.")
+        if (res.status === 401) {
+          router.push(`/login?next=${encodeURIComponent("/projects")}`)
+          return
+        }
+        setError(await readApiError(res, "Could not load projects."))
         setList([])
         return
       }
@@ -37,7 +50,7 @@ export default function ProjectsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [router])
 
   useEffect(() => {
     void load()
@@ -54,9 +67,8 @@ export default function ProjectsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: n, instructions, context }),
       })
-      const raw = await res.json()
       if (!res.ok) {
-        setError(typeof raw.error === "string" ? raw.error : "Create failed")
+        setError(await readApiError(res, "Create failed"))
         return
       }
       setName("")
@@ -97,9 +109,8 @@ export default function ProjectsPage() {
           context: editContext,
         }),
       })
-      const raw = await res.json()
       if (!res.ok) {
-        setError(typeof raw.error === "string" ? raw.error : "Save failed")
+        setError(await readApiError(res, "Save failed"))
         return
       }
       setEditingId(null)
@@ -119,7 +130,7 @@ export default function ProjectsPage() {
         method: "DELETE",
       })
       if (!res.ok) {
-        setError("Delete failed")
+        setError(await readApiError(res, "Delete failed"))
         return
       }
       if (editingId === id) setEditingId(null)

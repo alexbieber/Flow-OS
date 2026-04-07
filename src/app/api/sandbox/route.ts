@@ -165,36 +165,47 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const user = await getAuthenticatedUser()
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  try {
+    const user = await getAuthenticatedUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
 
-  const supabase = getServiceSupabase()
-  const { searchParams } = new URL(req.url)
-  const runId = searchParams.get("runId")
+    const supabase = getServiceSupabase()
+    const { searchParams } = new URL(req.url)
+    const runId = searchParams.get("runId")
 
-  if (runId) {
-    const { data } = await supabase
+    if (runId) {
+      const { data, error } = await supabase
+        .from("runs")
+        .select("*")
+        .eq("id", runId)
+        .maybeSingle()
+      if (error) {
+        return NextResponse.json({ error: error.message }, { status: 500 })
+      }
+      if (!data) return NextResponse.json(null, { status: 404 })
+      const row = data as Record<string, unknown>
+      if (String(row.user_id) !== user.id) {
+        return NextResponse.json({ error: "Not found" }, { status: 404 })
+      }
+      return NextResponse.json(rowToRun(row))
+    }
+
+    const { data, error } = await supabase
       .from("runs")
       .select("*")
-      .eq("id", runId)
-      .single()
-    if (!data) return NextResponse.json(null, { status: 404 })
-    const row = data as Record<string, unknown>
-    if (String(row.user_id) !== user.id) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 })
+      .eq("user_id", user.id)
+      .order("started_at", { ascending: false })
+      .limit(20)
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
     }
-    return NextResponse.json(rowToRun(row))
+    return NextResponse.json((data ?? []).map((r) => rowToRun(r as Record<string, unknown>)))
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error"
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  const { data } = await supabase
-    .from("runs")
-    .select("*")
-    .eq("user_id", user.id)
-    .order("started_at", { ascending: false })
-    .limit(20)
-  return NextResponse.json((data ?? []).map((r) => rowToRun(r as Record<string, unknown>)))
 }
 
 async function executeInBackground(run: Run, userId: string) {

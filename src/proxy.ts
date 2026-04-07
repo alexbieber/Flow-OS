@@ -1,6 +1,19 @@
 import { createServerClient } from "@supabase/ssr"
 import { NextResponse, type NextRequest } from "next/server"
 
+function redirectToLogin(req: NextRequest) {
+  const url = req.nextUrl.clone()
+  const nextPath = `${req.nextUrl.pathname}${req.nextUrl.search}`
+  url.pathname = "/login"
+  url.search = ""
+  if (nextPath && nextPath !== "/") {
+    url.searchParams.set("next", nextPath)
+  } else {
+    url.searchParams.delete("next")
+  }
+  return NextResponse.redirect(url)
+}
+
 export async function proxy(req: NextRequest) {
   let supabaseResponse = NextResponse.next({ request: req })
 
@@ -18,9 +31,7 @@ export async function proxy(req: NextRequest) {
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
   if (!supabaseUrl || !supabaseAnonKey) {
-    const url = req.nextUrl.clone()
-    url.pathname = "/login"
-    return NextResponse.redirect(url)
+    return redirectToLogin(req)
   }
 
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
@@ -43,9 +54,7 @@ export async function proxy(req: NextRequest) {
   } = await supabase.auth.getUser()
 
   if (!user) {
-    const url = req.nextUrl.clone()
-    url.pathname = "/login"
-    return NextResponse.redirect(url)
+    return redirectToLogin(req)
   }
 
   return supabaseResponse

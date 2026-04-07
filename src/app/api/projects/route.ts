@@ -14,24 +14,38 @@ function rowToProject(row: Record<string, unknown>): FlowosProject {
   }
 }
 
+function parseProjectPayload(body: unknown) {
+  const input = body as Record<string, unknown>
+  const name = typeof input.name === "string" ? input.name.trim().slice(0, 160) : ""
+  const instructions =
+    typeof input.instructions === "string" ? input.instructions.slice(0, 24_000) : ""
+  const context = typeof input.context === "string" ? input.context.slice(0, 48_000) : ""
+  return { name, instructions, context }
+}
+
 export async function GET() {
-  const user = await getAuthenticatedUser()
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  try {
+    const user = await getAuthenticatedUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
+
+    const supabase = getServiceSupabase()
+    const { data, error } = await supabase
+      .from("flowos_projects")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("updated_at", { ascending: false })
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    return NextResponse.json((data ?? []).map((r) => rowToProject(r as Record<string, unknown>)))
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Unknown error"
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
-
-  const supabase = getServiceSupabase()
-  const { data, error } = await supabase
-    .from("flowos_projects")
-    .select("*")
-    .eq("user_id", user.id)
-    .order("updated_at", { ascending: false })
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json((data ?? []).map((r) => rowToProject(r as Record<string, unknown>)))
 }
 
 export async function POST(req: NextRequest) {
@@ -42,14 +56,10 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json()
-    const name = typeof body.name === "string" ? body.name.trim().slice(0, 160) : ""
+    const { name, instructions, context } = parseProjectPayload(body)
     if (!name) {
       return NextResponse.json({ error: "name required" }, { status: 400 })
     }
-
-    const instructions =
-      typeof body.instructions === "string" ? body.instructions.slice(0, 24_000) : ""
-    const context = typeof body.context === "string" ? body.context.slice(0, 48_000) : ""
 
     const supabase = getServiceSupabase()
     const { data, error } = await supabase
