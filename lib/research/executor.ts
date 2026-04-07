@@ -204,6 +204,66 @@ ${report.slice(0, 24000)}
 `)
 }
 
+function needsStrictDecisionTemplate(goal: string): boolean {
+  return /\b(decision memo|executive recommendation|adoption plan|comparison table|fallback|compare|vs\.?)\b/i.test(
+    goal
+  )
+}
+
+function hasStrictDecisionTemplate(report: string): boolean {
+  const hasExecutive = /executive recommendation/i.test(report)
+  const hasPhases = /0-3 months|3-9 months|9-18 months|3-?phase adoption plan/i.test(report)
+  const hasTable = /comparison table/i.test(report) && /\|[^|\n]+\|[^|\n]+\|/.test(report)
+  const hasFailure = /where this recommendation could fail/i.test(report)
+  const hasEvidence = /evidence quality status/i.test(report)
+  return hasExecutive && hasPhases && hasTable && hasFailure && hasEvidence
+}
+
+async function enforceDecisionTemplate(report: string, goal: string, memory: string): Promise<string> {
+  if (!needsStrictDecisionTemplate(goal)) return report
+  if (hasStrictDecisionTemplate(report)) return report
+
+  return askGeminiReport(`
+Rewrite the report into this strict structure (do not invent facts or links):
+
+## 1) Executive recommendation
+- Default choice: ...
+- Fallback choice: ...
+
+## 2) 3-phase adoption plan
+### 0-3 months
+### 3-9 months
+### 9-18 months
+
+## 3) Comparison table
+Use a Markdown table with columns exactly:
+| pricing model | deployment options | ops complexity | scaling characteristics | latency/performance notes | ecosystem/integration maturity | key risks |
+
+## 4) Where this recommendation could fail
+- 3 to 5 concrete failure modes with uncertainty labels where needed.
+
+## 5) Evidence quality status
+- URL count
+- Unique domain count
+- Confidence level
+
+Constraints:
+- Use only evidence-backed claims from the provided log/current report.
+- Include source URLs inline in markdown.
+- Prefer official/vendor sources where available and label third-party sources as third-party.
+- If evidence is insufficient, include exactly: "Insufficient evidence for high-confidence recommendation."
+
+Goal:
+${JSON.stringify(goal)}
+
+Research log excerpt:
+${memory.slice(-12000)}
+
+Current report:
+${report.slice(0, 24000)}
+`)
+}
+
 async function enforceCitationGate(
   report: string,
   goal: string,
@@ -211,7 +271,8 @@ async function enforceCitationGate(
 ): Promise<string> {
   if (!isEvidenceHeavyGoal(goal) || meetsCitationGate(report)) {
     const withEvidence = ensureRecommendationEvidenceBlock(report, memory)
-    return enforceReportTone(withEvidence, goal, memory)
+    const withTone = await enforceReportTone(withEvidence, goal, memory)
+    return enforceDecisionTemplate(withTone, goal, memory)
   }
 
   const repaired = await askGeminiReport(`
@@ -239,14 +300,15 @@ Requirements:
 
   const repairedWithEvidence = ensureRecommendationEvidenceBlock(repaired, memory)
   if (meetsCitationGate(repairedWithEvidence)) {
-    return enforceReportTone(repairedWithEvidence, goal, memory)
+    const withTone = await enforceReportTone(repairedWithEvidence, goal, memory)
+    return enforceDecisionTemplate(withTone, goal, memory)
   }
 
   const stats = getEvidenceStats(repairedWithEvidence)
   if (/##\s*evidence quality status/i.test(repairedWithEvidence)) {
     return repairedWithEvidence
   }
-  return `## Evidence Quality Status
+  const insufficient = `## Evidence Quality Status
 - URL count: ${stats.urls.length}
 - Unique domains: ${stats.uniqueDomains.length}
 - Confidence: low
@@ -254,6 +316,7 @@ Requirements:
 Insufficient evidence for high-confidence recommendation.
 
 ${repairedWithEvidence}`
+  return enforceDecisionTemplate(insufficient, goal, memory)
 }
 
 async function askGeminiShort(prompt: string): Promise<string> {
