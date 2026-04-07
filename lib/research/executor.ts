@@ -55,6 +55,63 @@ function getEvidenceStats(text: string): { urls: string[]; uniqueDomains: string
   return { urls, uniqueDomains: Array.from(domains) }
 }
 
+function parseBrowserLinksOutput(raw: string): string[] {
+  const m = raw.match(/LINKS_JSON:\s*(\[[\s\S]*\])/)
+  if (!m) return []
+  try {
+    const arr = JSON.parse(m[1]) as string[]
+    return arr
+      .map((line) => {
+        const idx = line.lastIndexOf(" | ")
+        return idx >= 0 ? line.slice(idx + 3).trim() : line.trim()
+      })
+      .filter((u) => u.startsWith("http"))
+  } catch {
+    return []
+  }
+}
+
+async function browserSearchFallback(
+  sandbox: Sandbox,
+  query: string
+): Promise<{ urls: string[]; block: string }> {
+  const lines: string[] = []
+  const allUrls: string[] = []
+
+  const candidates = [
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=10`,
+  ]
+
+  for (const url of candidates) {
+    try {
+      const nav = await runBrowserOp(sandbox, { op: "goto", url })
+      lines.push(`BROWSER_SEARCH_ENGINE: ${url}`)
+      lines.push(nav.slice(0, 500))
+      const linksOut = await runBrowserOp(sandbox, { op: "links", max: 12 })
+      const found = parseBrowserLinksOutput(linksOut).filter(
+        (u) =>
+          !/duckduckgo\.com|bing\.com\/search|google\.com\/search/i.test(u)
+      )
+      for (const u of found) {
+        if (!allUrls.includes(u)) allUrls.push(u)
+      }
+      if (allUrls.length >= 4) break
+    } catch {
+      // continue to the next engine
+    }
+  }
+
+  if (allUrls.length > 0) {
+    lines.push("BROWSER_SEARCH_URLS:")
+    for (const u of allUrls.slice(0, 8)) lines.push(`URL: ${u}`)
+  } else {
+    lines.push("BROWSER_SEARCH_URLS: (none)")
+  }
+
+  return { urls: allUrls.slice(0, 8), block: lines.join("\n") }
+}
+
 function isEvidenceHeavyGoal(goal: string): boolean {
   return /\b(compare|pricing|benchmark|latency|performance|cost|sources?|official|market|vs\.?)\b/i.test(
     goal
@@ -98,6 +155,9 @@ Requirements:
   if (meetsCitationGate(repaired)) return repaired
 
   const stats = getEvidenceStats(repaired)
+  if (/##\s*evidence quality status/i.test(repaired)) {
+    return repaired
+  }
   return `## Evidence Quality Status
 - URL count: ${stats.urls.length}
 - Unique domains: ${stats.uniqueDomains.length}
@@ -178,6 +238,16 @@ async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
       else chunks.push(scrapeText)
       urlList = mergeUrls(urlList, parseSearchOutputUrls(scrapeText))
     }
+  }
+
+  if (urlList.length < 2) {
+    const browserFallback = await browserSearchFallback(sandbox, query).catch(
+      () => ({ urls: [] as string[], block: "" })
+    )
+    if (browserFallback.block.trim()) {
+      chunks.push("--- BROWSER_SEARCH_FALLBACK ---\n" + browserFallback.block)
+    }
+    urlList = mergeUrls(urlList, browserFallback.urls)
   }
 
   if (urlList.length > 0) {
