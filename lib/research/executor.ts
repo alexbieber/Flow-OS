@@ -28,8 +28,9 @@ const URL_RE = /https?:\/\/[^\s)\]]+/gi
 const EVIDENCE_MIN_URLS = 2
 const EVIDENCE_MIN_DOMAINS = 2
 const DECISION_MIN_URLS = 4
-const DECISION_MIN_DOMAINS = 3
+const DECISION_MIN_DOMAINS = 4
 const PRELIMINARY_RE = /\b(preliminary|incomplete|work in progress)\b/i
+const INSUFFICIENT_RECOMMENDATION_SENTENCE = "Insufficient evidence for high-confidence recommendation."
 
 function getGemini() {
   const key = process.env.GEMINI_API_KEY
@@ -251,7 +252,9 @@ Constraints:
 - Use only evidence-backed claims from the provided log/current report.
 - Include source URLs inline in markdown.
 - Prefer official/vendor sources where available and label third-party sources as third-party.
-- If evidence is insufficient, include exactly: "Insufficient evidence for high-confidence recommendation."
+- If evidence is insufficient, include exactly once: "${INSUFFICIENT_RECOMMENDATION_SENTENCE}".
+- Do not repeat the insufficient-evidence sentence in multiple sections.
+- Even under uncertainty, provide one conditional default and one conditional fallback in Executive recommendation.
 
 Goal:
 ${JSON.stringify(goal)}
@@ -264,6 +267,22 @@ ${report.slice(0, 24000)}
 `)
 }
 
+function normalizeInsufficientEvidenceLanguage(report: string): string {
+  const escaped = INSUFFICIENT_RECOMMENDATION_SENTENCE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const re = new RegExp(escaped, "g")
+  const matches = report.match(re) ?? []
+  if (matches.length <= 1) return report
+
+  let seen = false
+  return report.replace(re, () => {
+    if (!seen) {
+      seen = true
+      return INSUFFICIENT_RECOMMENDATION_SENTENCE
+    }
+    return "Evidence is limited; treat this as a conditional recommendation."
+  })
+}
+
 async function enforceCitationGate(
   report: string,
   goal: string,
@@ -272,7 +291,8 @@ async function enforceCitationGate(
   if (!isEvidenceHeavyGoal(goal) || meetsCitationGate(report)) {
     const withEvidence = ensureRecommendationEvidenceBlock(report, memory)
     const withTone = await enforceReportTone(withEvidence, goal, memory)
-    return enforceDecisionTemplate(withTone, goal, memory)
+    const templated = await enforceDecisionTemplate(withTone, goal, memory)
+    return normalizeInsufficientEvidenceLanguage(templated)
   }
 
   const repaired = await askGeminiReport(`
@@ -301,7 +321,8 @@ Requirements:
   const repairedWithEvidence = ensureRecommendationEvidenceBlock(repaired, memory)
   if (meetsCitationGate(repairedWithEvidence)) {
     const withTone = await enforceReportTone(repairedWithEvidence, goal, memory)
-    return enforceDecisionTemplate(withTone, goal, memory)
+    const templated = await enforceDecisionTemplate(withTone, goal, memory)
+    return normalizeInsufficientEvidenceLanguage(templated)
   }
 
   const stats = getEvidenceStats(repairedWithEvidence)
@@ -316,7 +337,8 @@ Requirements:
 Insufficient evidence for high-confidence recommendation.
 
 ${repairedWithEvidence}`
-  return enforceDecisionTemplate(insufficient, goal, memory)
+  const templated = await enforceDecisionTemplate(insufficient, goal, memory)
+  return normalizeInsufficientEvidenceLanguage(templated)
 }
 
 async function askGeminiShort(prompt: string): Promise<string> {
@@ -366,6 +388,35 @@ function mergeUrls(primary: string[], extra: string[]): string[] {
   return out
 }
 
+function pickDomainDiverseUrls(urls: string[], maxUrls: number): string[] {
+  const picked: string[] = []
+  const byDomain = new Map<string, string[]>()
+  for (const u of urls) {
+    try {
+      const d = new URL(u).hostname.replace(/^www\./i, "").toLowerCase()
+      const arr = byDomain.get(d) ?? []
+      arr.push(u)
+      byDomain.set(d, arr)
+    } catch {
+      // ignore malformed urls
+    }
+  }
+
+  for (const arr of byDomain.values()) {
+    if (arr[0]) picked.push(arr[0])
+    if (picked.length >= maxUrls) return picked
+  }
+
+  for (const arr of byDomain.values()) {
+    for (let i = 1; i < arr.length; i++) {
+      picked.push(arr[i])
+      if (picked.length >= maxUrls) return picked
+    }
+  }
+
+  return picked.slice(0, maxUrls)
+}
+
 async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
   const chunks: string[] = []
   let urlList: string[] = []
@@ -409,7 +460,8 @@ async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
   }
 
   if (urlList.length > 0) {
-    const bodies = await fetchTopUrlBodiesInSandbox(sandbox, urlList, 2).catch(() => "")
+    const diverse = pickDomainDiverseUrls(urlList, 5)
+    const bodies = await fetchTopUrlBodiesInSandbox(sandbox, diverse, 5).catch(() => "")
     if (bodies?.trim()) chunks.push(bodies.trim())
   }
 
