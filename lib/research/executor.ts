@@ -211,10 +211,21 @@ function needsStrictDecisionTemplate(goal: string): boolean {
   )
 }
 
+function hasWellFormedComparisonTable(report: string): boolean {
+  const lines = report.split(/\r?\n/)
+  const idx = lines.findIndex((line) => /comparison table/i.test(line))
+  if (idx < 0) return false
+  const tableLines = lines
+    .slice(idx + 1)
+    .filter((line) => /^\|/.test(line.trim()))
+  // header + separator + at least 2 data rows
+  return tableLines.length >= 4
+}
+
 function hasStrictDecisionTemplate(report: string): boolean {
   const hasExecutive = /executive recommendation/i.test(report)
   const hasPhases = /0-3 months|3-9 months|9-18 months|3-?phase adoption plan/i.test(report)
-  const hasTable = /comparison table/i.test(report) && /\|[^|\n]+\|[^|\n]+\|/.test(report)
+  const hasTable = /comparison table/i.test(report) && hasWellFormedComparisonTable(report)
   const hasFailure = /where this recommendation could fail/i.test(report)
   const hasEvidence = /evidence quality status/i.test(report)
   return hasExecutive && hasPhases && hasTable && hasFailure && hasEvidence
@@ -239,6 +250,7 @@ Rewrite the report into this strict structure (do not invent facts or links):
 ## 3) Comparison table
 Use a Markdown table with columns exactly:
 | pricing model | deployment options | ops complexity | scaling characteristics | latency/performance notes | ecosystem/integration maturity | key risks |
+Do not collapse the table into a single line. Use one row per line and include at least Pinecone, Weaviate, and Qdrant rows.
 
 ## 4) Where this recommendation could fail
 - 3 to 5 concrete failure modes with uncertainty labels where needed.
@@ -267,6 +279,42 @@ ${report.slice(0, 24000)}
 `)
 }
 
+function normalizeReportWhitespace(report: string): string {
+  return report
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+async function enforceStructuredPolish(report: string, goal: string, memory: string): Promise<string> {
+  if (!needsStrictDecisionTemplate(goal)) return normalizeReportWhitespace(report)
+  const malformedTable = !hasWellFormedComparisonTable(report)
+  const denseOrMessy = /\|.{350,}\|/.test(report) || /##\s*3\)\s*comparison table\s*\n[^\n|]/i.test(report)
+  if (!malformedTable && !denseOrMessy) return normalizeReportWhitespace(report)
+
+  const polished = await askGeminiReport(`
+Rewrite the memo for clean, readable markdown formatting only.
+
+Rules:
+- Keep all facts, sources, and recommendations logically equivalent.
+- Keep the same section structure and numbering.
+- Ensure every section has readable paragraphs and bullet lists.
+- Comparison table must be multi-line markdown (header + separator + one row per option).
+- Do not invent any new facts, numbers, benchmarks, or URLs.
+
+Goal:
+${JSON.stringify(goal)}
+
+Research log excerpt:
+${memory.slice(-8000)}
+
+Current report:
+${report.slice(0, 24000)}
+`)
+  return normalizeReportWhitespace(polished)
+}
+
 function normalizeInsufficientEvidenceLanguage(report: string): string {
   const escaped = INSUFFICIENT_RECOMMENDATION_SENTENCE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const re = new RegExp(escaped, "g")
@@ -283,6 +331,104 @@ function normalizeInsufficientEvidenceLanguage(report: string): string {
   })
 }
 
+function buildSourceLedger(text: string): { official: string[]; thirdParty: string[] } {
+  const urls = extractUrls(text)
+  const official: string[] = []
+  const thirdParty: string[] = []
+  for (const u of urls) {
+    try {
+      const host = new URL(u).hostname.replace(/^www\./i, "").toLowerCase()
+      if (host.endsWith("pinecone.io") || host.endsWith("weaviate.io") || host.endsWith("qdrant.tech")) {
+        if (!official.includes(u)) official.push(u)
+      } else if (!thirdParty.includes(u)) {
+        thirdParty.push(u)
+      }
+    } catch {
+      // ignore malformed urls
+    }
+  }
+  return { official: official.slice(0, 8), thirdParty: thirdParty.slice(0, 8) }
+}
+
+function ensureSourceLedgerBlock(report: string, memory: string): string {
+  if (/##\s*source quality ledger/i.test(report)) return report
+  const ledger = buildSourceLedger(`${report}\n${memory}`)
+  if (ledger.official.length + ledger.thirdParty.length === 0) return report
+  const officialBlock =
+    ledger.official.length > 0
+      ? ledger.official.map((u) => `- ${u}`).join("\n")
+      : "- (none captured)"
+  const thirdPartyBlock =
+    ledger.thirdParty.length > 0
+      ? ledger.thirdParty.map((u) => `- ${u}`).join("\n")
+      : "- (none captured)"
+  return `${report.trim()}\n\n## Source quality ledger\n**Official/vendor sources**\n${officialBlock}\n\n**Third-party sources**\n${thirdPartyBlock}`
+}
+
+function shouldEnforceClaimCitationMap(report: string): boolean {
+  if (/##\s*claim-to-citation map/i.test(report)) return false
+  const tableRows = report
+    .split(/\r?\n/)
+    .filter((line) => /^\|/.test(line) && !/^\|\s*-+/.test(line))
+  if (tableRows.length === 0) return false
+  const rowsWithoutUrl = tableRows.filter((line) => !/https?:\/\//i.test(line)).length
+  return rowsWithoutUrl > 0
+}
+
+async function enforceClaimCitationMap(report: string, goal: string, memory: string): Promise<string> {
+  if (!needsStrictDecisionTemplate(goal)) return report
+  if (!shouldEnforceClaimCitationMap(report)) return report
+  return askGeminiReport(`
+Improve this decision memo by adding a "## Claim-to-citation map" section and ensuring key claims in the comparison table have inline source URLs.
+
+Rules:
+- Do not invent facts, numbers, or links.
+- Preserve the existing section structure.
+- Add a compact markdown table under "## Claim-to-citation map" with columns:
+| claim | source URL | source type (official|third-party) | confidence (high|medium|low) |
+- If a claim lacks evidence, mark confidence low and explicitly say evidence is limited.
+
+Goal:
+${JSON.stringify(goal)}
+
+Research log excerpt:
+${memory.slice(-10000)}
+
+Current report:
+${report.slice(0, 24000)}
+`)
+}
+
+async function enforceContradictionGuard(report: string, goal: string, memory: string): Promise<string> {
+  if (!needsStrictDecisionTemplate(goal)) return report
+  return askGeminiReport(`
+Check the memo for internal contradictions and fix them while preserving factual grounding.
+
+Rules:
+- Keep the same top-level sections.
+- Ensure Executive recommendation aligns with comparison table and failure section.
+- Keep uncertainty labels, but do not contradict the recommendation rationale.
+- Do not invent facts, links, benchmarks, or dates.
+
+Goal:
+${JSON.stringify(goal)}
+
+Research log excerpt:
+${memory.slice(-9000)}
+
+Current report:
+${report.slice(0, 24000)}
+`)
+}
+
+async function finalizeDecisionQuality(report: string, goal: string, memory: string): Promise<string> {
+  const polished = await enforceStructuredPolish(report, goal, memory)
+  const withLedger = ensureSourceLedgerBlock(polished, memory)
+  const withMap = await enforceClaimCitationMap(withLedger, goal, memory)
+  const withoutContradictions = await enforceContradictionGuard(withMap, goal, memory)
+  return normalizeInsufficientEvidenceLanguage(normalizeReportWhitespace(withoutContradictions))
+}
+
 async function enforceCitationGate(
   report: string,
   goal: string,
@@ -292,7 +438,7 @@ async function enforceCitationGate(
     const withEvidence = ensureRecommendationEvidenceBlock(report, memory)
     const withTone = await enforceReportTone(withEvidence, goal, memory)
     const templated = await enforceDecisionTemplate(withTone, goal, memory)
-    return normalizeInsufficientEvidenceLanguage(templated)
+    return finalizeDecisionQuality(templated, goal, memory)
   }
 
   const repaired = await askGeminiReport(`
@@ -322,7 +468,7 @@ Requirements:
   if (meetsCitationGate(repairedWithEvidence)) {
     const withTone = await enforceReportTone(repairedWithEvidence, goal, memory)
     const templated = await enforceDecisionTemplate(withTone, goal, memory)
-    return normalizeInsufficientEvidenceLanguage(templated)
+    return finalizeDecisionQuality(templated, goal, memory)
   }
 
   const stats = getEvidenceStats(repairedWithEvidence)
@@ -338,7 +484,7 @@ Insufficient evidence for high-confidence recommendation.
 
 ${repairedWithEvidence}`
   const templated = await enforceDecisionTemplate(insufficient, goal, memory)
-  return normalizeInsufficientEvidenceLanguage(templated)
+  return finalizeDecisionQuality(templated, goal, memory)
 }
 
 async function askGeminiShort(prompt: string): Promise<string> {
