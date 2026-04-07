@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
-import { completeJarvisTurn, type JarvisHistoryTurn } from "@/lib/ai/jarvis-turn"
+import {
+  answerFromRecentContext,
+  completeJarvisTurn,
+  shouldPreferContextAnswer,
+  type JarvisHistoryTurn,
+} from "@/lib/ai/jarvis-turn"
 import { getAuthenticatedUser } from "@/lib/auth/session"
 import { loadProjectBlockForUser } from "@/lib/projects/load-server"
 import { getServiceSupabase } from "@/lib/supabase/admin"
@@ -93,10 +98,17 @@ export async function POST(req: NextRequest) {
       if (block) projectBlock = block
     }
 
-    const turn = await completeJarvisTurn(trimmed, {
-      projectBlock,
-      recentHistory: [...historyBefore, { role: "user", content: trimmed }],
-    })
+    const recentHistory = [...historyBefore, { role: "user" as const, content: trimmed }]
+    const turn = shouldPreferContextAnswer(trimmed, recentHistory)
+      ? {
+          shouldRunAgent: false,
+          reply: await answerFromRecentContext(trimmed, recentHistory),
+          researchGoal: "",
+        }
+      : await completeJarvisTurn(trimmed, {
+          projectBlock,
+          recentHistory,
+        })
 
     const jarvisMsgId = uuidv4()
     const jarvisTs = new Date().toISOString()

@@ -24,6 +24,7 @@ export type OnUpdate = (update: {
 }) => void
 
 const MAX_PYTHON_BYTES = 24_000
+const URL_RE = /https?:\/\/[^\s)\]]+/gi
 
 function getGemini() {
   const key = process.env.GEMINI_API_KEY
@@ -33,6 +34,78 @@ function getGemini() {
 
 function log(onUpdate: OnUpdate, type: RunLog["type"], message: string) {
   onUpdate({ log: { timestamp: new Date().toISOString(), type, message } })
+}
+
+function extractUrls(text: string): string[] {
+  const matches = text.match(URL_RE) ?? []
+  const clean = matches.map((u) => u.replace(/[.,;]+$/, ""))
+  return Array.from(new Set(clean))
+}
+
+function getEvidenceStats(text: string): { urls: string[]; uniqueDomains: string[] } {
+  const urls = extractUrls(text)
+  const domains = new Set<string>()
+  for (const u of urls) {
+    try {
+      domains.add(new URL(u).hostname.replace(/^www\./i, "").toLowerCase())
+    } catch {
+      // ignore malformed URLs
+    }
+  }
+  return { urls, uniqueDomains: Array.from(domains) }
+}
+
+function isEvidenceHeavyGoal(goal: string): boolean {
+  return /\b(compare|pricing|benchmark|latency|performance|cost|sources?|official|market|vs\.?)\b/i.test(
+    goal
+  )
+}
+
+function meetsCitationGate(text: string): boolean {
+  const stats = getEvidenceStats(text)
+  return stats.urls.length >= 2 && stats.uniqueDomains.length >= 2
+}
+
+async function enforceCitationGate(
+  report: string,
+  goal: string,
+  memory: string
+): Promise<string> {
+  if (!isEvidenceHeavyGoal(goal) || meetsCitationGate(report)) return report
+
+  const repaired = await askGeminiReport(`
+You are finalizing a research report and must enforce an evidence-quality gate.
+
+Goal: ${JSON.stringify(goal)}
+
+Research log:
+${memory.slice(-14000)}
+
+Current draft report:
+${report.slice(0, 22000)}
+
+Requirements:
+- Include at least 2 source URLs from the log if available.
+- Include an "## Evidence Quality Status" section with:
+  - URL count
+  - unique domain count
+  - confidence level
+- If fewer than 2 independent sources are available, DO NOT make strong recommendations.
+- In that insufficient-evidence case, clearly say "Insufficient evidence for high-confidence recommendation."
+- Never invent URLs, prices, benchmarks, or official claims.
+`)
+
+  if (meetsCitationGate(repaired)) return repaired
+
+  const stats = getEvidenceStats(repaired)
+  return `## Evidence Quality Status
+- URL count: ${stats.urls.length}
+- Unique domains: ${stats.uniqueDomains.length}
+- Confidence: low
+
+Insufficient evidence for high-confidence recommendation.
+
+${repaired}`
 }
 
 async function askGeminiShort(prompt: string): Promise<string> {
@@ -221,6 +294,7 @@ export async function runAgentLoop(
   memory += `RESEARCH LOG:\n`
   let stepCount = 0
   const memories: Record<string, string> = {}
+  const evidenceHeavy = isEvidenceHeavyGoal(goal)
 
   log(onUpdate, "system", `Agent starting: "${goal.slice(0, 80)}..."`)
 
@@ -340,6 +414,29 @@ Respond ONLY with JSON:
       if (key && value) memories[key] = value
       memory += `\n[Step ${stepCount}] REMEMBER: ${toolInput}\n`
     } else if (decision.tool === "done") {
+      if (evidenceHeavy) {
+        const stats = getEvidenceStats(memory)
+        const evidenceInsufficient =
+          stats.urls.length < 2 || stats.uniqueDomains.length < 2
+        if (evidenceInsufficient && stepCount < maxSteps) {
+          log(
+            onUpdate,
+            "warning",
+            "Evidence quality gate: insufficient independent sources; running broader search before final report."
+          )
+          const widened = await toolWideSearch(
+            sandbox,
+            JSON.stringify([
+              `${goal} official documentation`,
+              `${goal} pricing page`,
+              `${goal} benchmark comparison`,
+            ])
+          )
+          memory += `\n[Step ${stepCount}] EVIDENCE_GATE_WIDE_SEARCH\n${widened.slice(0, 2600)}\n`
+          continue
+        }
+      }
+
       log(onUpdate, "success", "Writing final report...")
       onUpdate({ currentStep: "Writing report...", progress: 95 })
 
@@ -363,11 +460,11 @@ Rules:
 `)
       }
 
-      return report
+      return enforceCitationGate(report, goal, memory)
     }
   }
 
-  return askGeminiReport(`
+  const fallbackReport = await askGeminiReport(`
 The agent stopped before a formal "done" tool. Using only this log — if search failed, say so first:
 
 ${memory.slice(-12000)}
@@ -375,6 +472,7 @@ ${memory.slice(-12000)}
 Write a Markdown report for: ${JSON.stringify(goal)}
 No invented URLs or quotes. Flag uncertainty clearly.
 `)
+  return enforceCitationGate(fallbackReport, goal, memory)
 }
 
 export async function executeResearchRun(run: Run, _userId: string, onUpdate: OnUpdate): Promise<void> {
