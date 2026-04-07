@@ -25,6 +25,11 @@ export type OnUpdate = (update: {
 
 const MAX_PYTHON_BYTES = 24_000
 const URL_RE = /https?:\/\/[^\s)\]]+/gi
+const EVIDENCE_MIN_URLS = 2
+const EVIDENCE_MIN_DOMAINS = 2
+const DECISION_MIN_URLS = 4
+const DECISION_MIN_DOMAINS = 3
+const PRELIMINARY_RE = /\b(preliminary|incomplete|work in progress)\b/i
 
 function getGemini() {
   const key = process.env.GEMINI_API_KEY
@@ -140,7 +145,63 @@ function isEvidenceHeavyGoal(goal: string): boolean {
 
 function meetsCitationGate(text: string): boolean {
   const stats = getEvidenceStats(text)
-  return stats.urls.length >= 2 && stats.uniqueDomains.length >= 2
+  return stats.urls.length >= EVIDENCE_MIN_URLS && stats.uniqueDomains.length >= EVIDENCE_MIN_DOMAINS
+}
+
+function meetsDecisionCitationGate(text: string): boolean {
+  const stats = getEvidenceStats(text)
+  return stats.urls.length >= DECISION_MIN_URLS && stats.uniqueDomains.length >= DECISION_MIN_DOMAINS
+}
+
+function extractOfficialVendorUrls(text: string): string[] {
+  const urls = extractUrls(text)
+  const official = urls.filter((u) => {
+    try {
+      const host = new URL(u).hostname.toLowerCase()
+      return (
+        host.endsWith("pinecone.io") ||
+        host.endsWith("weaviate.io") ||
+        host.endsWith("qdrant.tech")
+      )
+    } catch {
+      return false
+    }
+  })
+  return Array.from(new Set(official)).slice(0, 6)
+}
+
+function ensureRecommendationEvidenceBlock(report: string, memory: string): string {
+  if (/##\s*recommendation evidence/i.test(report)) return report
+  if (!/executive recommendation|recommendation/i.test(report)) return report
+  const vendors = extractOfficialVendorUrls(memory)
+  if (vendors.length === 0) return report
+  return `${report.trim()}\n\n## Recommendation evidence\n${vendors
+    .slice(0, 4)
+    .map((u) => `- ${u}`)
+    .join("\n")}`
+}
+
+async function enforceReportTone(report: string, goal: string, memory: string): Promise<string> {
+  if (!PRELIMINARY_RE.test(report)) return report
+  if (!meetsDecisionCitationGate(report)) return report
+  return askGeminiReport(`
+Rewrite the report below to sound final and decision-oriented.
+
+Goal: ${JSON.stringify(goal)}
+
+Rules:
+- Keep all factual claims and URLs grounded in the original text/log.
+- Keep or improve the recommendation and fallback sections.
+- Keep an "Evidence quality status" section.
+- Remove wording like "preliminary", "incomplete", or "work in progress".
+- Do not invent new numbers, dates, benchmarks, or links.
+
+Research log excerpt:
+${memory.slice(-9000)}
+
+Current report:
+${report.slice(0, 24000)}
+`)
 }
 
 async function enforceCitationGate(
@@ -148,7 +209,10 @@ async function enforceCitationGate(
   goal: string,
   memory: string
 ): Promise<string> {
-  if (!isEvidenceHeavyGoal(goal) || meetsCitationGate(report)) return report
+  if (!isEvidenceHeavyGoal(goal) || meetsCitationGate(report)) {
+    const withEvidence = ensureRecommendationEvidenceBlock(report, memory)
+    return enforceReportTone(withEvidence, goal, memory)
+  }
 
   const repaired = await askGeminiReport(`
 You are finalizing a research report and must enforce an evidence-quality gate.
@@ -163,6 +227,7 @@ ${report.slice(0, 22000)}
 
 Requirements:
 - Include at least 2 source URLs from the log if available.
+- For recommendation sections (default + fallback), include official vendor URLs when available.
 - Include an "## Evidence Quality Status" section with:
   - URL count
   - unique domain count
@@ -172,11 +237,14 @@ Requirements:
 - Never invent URLs, prices, benchmarks, or official claims.
 `)
 
-  if (meetsCitationGate(repaired)) return repaired
+  const repairedWithEvidence = ensureRecommendationEvidenceBlock(repaired, memory)
+  if (meetsCitationGate(repairedWithEvidence)) {
+    return enforceReportTone(repairedWithEvidence, goal, memory)
+  }
 
-  const stats = getEvidenceStats(repaired)
-  if (/##\s*evidence quality status/i.test(repaired)) {
-    return repaired
+  const stats = getEvidenceStats(repairedWithEvidence)
+  if (/##\s*evidence quality status/i.test(repairedWithEvidence)) {
+    return repairedWithEvidence
   }
   return `## Evidence Quality Status
 - URL count: ${stats.urls.length}
@@ -185,7 +253,7 @@ Requirements:
 
 Insufficient evidence for high-confidence recommendation.
 
-${repaired}`
+${repairedWithEvidence}`
 }
 
 async function askGeminiShort(prompt: string): Promise<string> {
@@ -514,7 +582,7 @@ Respond ONLY with JSON:
       if (evidenceHeavy) {
         const stats = getEvidenceStats(memory)
         const evidenceInsufficient =
-          stats.urls.length < 2 || stats.uniqueDomains.length < 2
+          stats.urls.length < DECISION_MIN_URLS || stats.uniqueDomains.length < DECISION_MIN_DOMAINS
         if (evidenceInsufficient && stepCount < maxSteps) {
           log(
             onUpdate,
@@ -554,6 +622,9 @@ Rules:
 - Use ## for sections, **bold** for key figures
 - If evidence is thin, say so explicitly
 - Do not present model guesses as web-fetched facts
+- Include "Executive recommendation" with one default choice + one fallback.
+- Include at least one official vendor URL in recommendation sections when available.
+- If URL count >= ${DECISION_MIN_URLS} and distinct domains >= ${DECISION_MIN_DOMAINS}, avoid "preliminary/incomplete/work in progress" wording.
 `)
       }
 
@@ -568,6 +639,7 @@ ${memory.slice(-12000)}
 
 Write a Markdown report for: ${JSON.stringify(goal)}
 No invented URLs or quotes. Flag uncertainty clearly.
+If evidence supports it (>= ${DECISION_MIN_URLS} URLs and >= ${DECISION_MIN_DOMAINS} domains), avoid "preliminary/incomplete/work in progress" phrasing.
 `)
   return enforceCitationGate(fallbackReport, goal, memory)
 }
