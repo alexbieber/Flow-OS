@@ -112,6 +112,26 @@ async function browserSearchFallback(
   return { urls: allUrls.slice(0, 8), block: lines.join("\n") }
 }
 
+function querySeedUrls(query: string): string[] {
+  const q = query.toLowerCase()
+  const seeds: string[] = []
+  if (q.includes("pinecone")) {
+    seeds.push("https://www.pinecone.io/pricing/")
+    seeds.push("https://docs.pinecone.io/")
+    seeds.push("https://www.pinecone.io/security/")
+  }
+  if (q.includes("weaviate")) {
+    seeds.push("https://weaviate.io/pricing")
+    seeds.push("https://weaviate.io/developers/weaviate")
+  }
+  if (q.includes("qdrant")) {
+    seeds.push("https://qdrant.tech/pricing/")
+    seeds.push("https://qdrant.tech/documentation/")
+    seeds.push("https://qdrant.tech/hybrid-cloud/")
+  }
+  return Array.from(new Set(seeds))
+}
+
 function isEvidenceHeavyGoal(goal: string): boolean {
   return /\b(compare|pricing|benchmark|latency|performance|cost|sources?|official|market|vs\.?)\b/i.test(
     goal
@@ -240,13 +260,20 @@ async function toolSearch(sandbox: Sandbox, query: string): Promise<string> {
     }
   }
 
-  if (urlList.length < 2) {
-    const browserFallback = await browserSearchFallback(sandbox, query).catch(
-      () => ({ urls: [] as string[], block: "" })
+  const seedUrls = querySeedUrls(query)
+  if (seedUrls.length > 0) {
+    urlList = mergeUrls(urlList, seedUrls)
+    chunks.push(
+      "--- OFFICIAL_SEED_URLS ---\n" + seedUrls.map((u) => `URL: ${u}`).join("\n")
     )
-    if (browserFallback.block.trim()) {
-      chunks.push("--- BROWSER_SEARCH_FALLBACK ---\n" + browserFallback.block)
-    }
+  }
+
+  if (urlList.length < 2 && process.env.RESEARCH_BROWSER_SEARCH_FALLBACK === "1") {
+    const browserFallback = await browserSearchFallback(sandbox, query).catch(() => ({
+      urls: [] as string[],
+      block: "",
+    }))
+    if (browserFallback.block.trim()) chunks.push("--- BROWSER_SEARCH_FALLBACK ---\n" + browserFallback.block)
     urlList = mergeUrls(urlList, browserFallback.urls)
   }
 
